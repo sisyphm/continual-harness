@@ -589,6 +589,39 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
     return "no_op"
 
 
+def _grass_tiles(state: dict[str, Any]) -> list[tuple[int, int]]:
+    grid = ((state.get("map") or {}).get("porymap") or {}).get("grid")
+    if not grid:
+        return []
+    return [(x, y) for y, row in enumerate(grid) for x, c in enumerate(row) if c == "~"]
+
+
+_GRIND_RADIUS = 9
+
+
+def grind_action(state: dict[str, Any], grind_state: dict[str, Any]) -> str:
+    """One overworld step of grinding: pace through the grass *near where grinding
+    started* so wild encounters keep triggering (the caller fights them for XP),
+    staying local so we don't wander into the story NPC's sight before levelling up.
+    Used to reach a gate's required level the way a player naturally would."""
+    ensure_porymap_state(state)
+    grass = _grass_tiles(state)
+    if len(grass) < 2:
+        return "no_op"
+    pos = state.get("player", {}).get("position") or {}
+    x, y = int(pos.get("x") or 0), int(pos.get("y") or 0)
+    home = grind_state.setdefault("home", (x, y))
+    local = [t for t in grass if abs(t[0] - home[0]) + abs(t[1] - home[1]) <= _GRIND_RADIUS]
+    if len(local) < 2:
+        local = grass
+    waypoints = (min(local, key=lambda t: t[1]), max(local, key=lambda t: t[1]))
+    idx = grind_state.get("idx", 0)
+    if abs(x - waypoints[idx][0]) + abs(y - waypoints[idx][1]) <= 1:
+        idx ^= 1
+        grind_state["idx"] = idx
+    return find_path_action(state, waypoints[idx][0], waypoints[idx][1])
+
+
 def log(message: object) -> None:
     logger.info("[heatz] %s", message)
 

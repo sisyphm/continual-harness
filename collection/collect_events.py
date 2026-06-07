@@ -11,7 +11,7 @@ from pathlib import Path
 from collection.actions import normalize_action, run_action_frames, timing_for, update_facing
 from collection.catalog import EVENT_POSTCONDITION_ALIAS, discover_heatz_events
 from collection.direct_runner import DirectEmulatorRunner
-from collection.heatz_adapter import HeatzPolicy, _starter_ui_active, _visual_clock_ui, _visual_dialog_open, build_heatz_state
+from collection.heatz_adapter import HeatzPolicy, _starter_ui_active, _visual_clock_ui, _visual_dialog_open, build_heatz_state, grind_action
 from collection.recorder import ChunkRecorder
 from collection.state import control_mode as classify_control_mode, location_name
 
@@ -137,6 +137,31 @@ def _party_has_species_level(state, species: str, min_level: int) -> bool:
         if name == wanted and level >= min_level:
             return True
     return False
+
+
+# Story gates that require the starter to be a certain level. We grind the route's
+# grass up to this level once the rest of the gate is satisfied (e.g. rival beaten).
+_EVENT_GRIND_LEVEL = {"MAY_ROUTE103_INTERACTION": 7}
+
+
+def _grind_target(event_id: str | None, current) -> int | None:
+    """Return the level to grind Mudkip to, only when the gate's *other* conditions
+    already hold and the level is the lone thing missing (so we don't grind before
+    actually reaching/beating the gate). None means "don't grind"."""
+    target = _EVENT_GRIND_LEVEL.get(event_id or "")
+    if target is None or _party_has_species_level(current, "Mudkip", target):
+        return None
+    if event_id == "MAY_ROUTE103_INTERACTION":
+        # Grind up FIRST (the rival's Treecko is super-effective vs Mudkip, a coin
+        # flip at low level). Once at level the policy walks up and wins easily.
+        if (
+            current.map == "ROUTE 103"
+            and current.control_mode == "free_overworld"
+            and not current.in_battle
+            and not current.dialogue
+        ):
+            return target
+    return None
 
 
 def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunner, current) -> bool:
@@ -434,6 +459,7 @@ def collect_one_event(
         policy_sources_used: set[str] = set()
         prev_action: str | None = None
         stuck_count = 0
+        grind_state: dict = {}
         last_progress_key = _state_key(start_state)
         target_tail_actions = 0
         target_tail_stall_count = 0
@@ -498,33 +524,42 @@ def collect_one_event(
                 )
                 if prev_action:
                     h_state["prev_action"] = prev_action.lower()
-                action = normalize_action(policy.act(h_state))
+                # If the only thing left to satisfy the gate is Mudkip's level (the
+                # rival is beaten and we're back in control but under-levelled), grind
+                # in the route's grass instead of stalling — the policy itself fights
+                # the wild battles this triggers.
+                if not current_before_action.in_battle and _grind_target(event_id, current_before_action) is not None:
+                    action = normalize_action(grind_action(h_state, grind_state))
+                    policy_source = "heatz_grind"
+                    stuck_count = 0
+                else:
+                    action = normalize_action(policy.act(h_state))
 
-                at_physical_target = expected_state is not None and _physical_target_reached(current_before_action, expected_state)
-                can_plan = _can_plan_from_state(current_before_action, visible_dialog=visible_dialog)
-                # Some screens (clock-setting, Birch's starter bag) read as overworld in
-                # memory but need real UI navigation that the policy handles itself. While
-                # such a UI is active, trust the policy's action and suppress the generic
-                # tail-settle / BFS fallbacks, or they clobber the menu interaction.
-                special_ui_active = _visual_clock_ui(runner.env) or (
-                    event_id == "STARTER_CHOSEN" and _starter_ui_active(runner.env)
-                )
-                if not special_ui_active and at_physical_target and (visible_dialog or current_before_action.control_mode != "free_overworld"):
-                    action = _target_tail_action(target_tail_actions)
-                    target_tail_actions += 1
-                    policy_source = "heatz_script_tail_settle"
-                    stuck_count = 0
-                elif not special_ui_active and at_physical_target and current_before_action.control_mode == "free_overworld" and not _movement_responsive(runner):
-                    action = _target_tail_action(target_tail_actions)
-                    target_tail_actions += 1
-                    policy_source = "heatz_script_tail_settle"
-                    stuck_count = 0
-                elif not special_ui_active and expected_state is not None and can_plan and (stuck_count >= 5 or action == "WAIT"):
-                    fallback_action = _plan_first_action_to_expected(runner, expected_state)
-                    if fallback_action:
-                        action = normalize_action(fallback_action)
-                        policy_source = "heatz_emulator_bfs_fallback"
+                    at_physical_target = expected_state is not None and _physical_target_reached(current_before_action, expected_state)
+                    can_plan = _can_plan_from_state(current_before_action, visible_dialog=visible_dialog)
+                    # Some screens (clock-setting, Birch's starter bag) read as overworld in
+                    # memory but need real UI navigation that the policy handles itself. While
+                    # such a UI is active, trust the policy's action and suppress the generic
+                    # tail-settle / BFS fallbacks, or they clobber the menu interaction.
+                    special_ui_active = _visual_clock_ui(runner.env) or (
+                        event_id == "STARTER_CHOSEN" and _starter_ui_active(runner.env)
+                    )
+                    if not special_ui_active and at_physical_target and (visible_dialog or current_before_action.control_mode != "free_overworld"):
+                        action = _target_tail_action(target_tail_actions)
+                        target_tail_actions += 1
+                        policy_source = "heatz_script_tail_settle"
                         stuck_count = 0
+                    elif not special_ui_active and at_physical_target and current_before_action.control_mode == "free_overworld" and not _movement_responsive(runner):
+                        action = _target_tail_action(target_tail_actions)
+                        target_tail_actions += 1
+                        policy_source = "heatz_script_tail_settle"
+                        stuck_count = 0
+                    elif not special_ui_active and expected_state is not None and can_plan and (stuck_count >= 5 or action == "WAIT"):
+                        fallback_action = _plan_first_action_to_expected(runner, expected_state)
+                        if fallback_action:
+                            action = normalize_action(fallback_action)
+                            policy_source = "heatz_emulator_bfs_fallback"
+                            stuck_count = 0
 
                 policy_sources_used.add(policy_source)
                 state_before_perform = current_before_action
