@@ -349,30 +349,95 @@ def _is_trainer_battle(env: Any) -> bool:
         return False
 
 
+_STATUS_MOVE_NAMES = {
+    "growl", "tail_whip", "leer", "string_shot", "harden", "sand_attack",
+    "withdraw", "defense_curl", "mud_sport", "water_sport", "focus_energy",
+    "minimize", "scary_face",
+}
+
+
+def _best_move_slot(env: Any) -> int:
+    """Slot (0-3) of the best damaging move that still has PP — most PP wins, so we
+    don't keep mashing a drained move into a "no PP left" soft-lock. Falls back to 0
+    (lets the game force Struggle when every move is out of PP)."""
+    try:
+        active = (env.memory_reader.read_party_pokemon() or [None])[0]
+        moves = [str(m or "").lower().replace("-", "_") for m in (getattr(active, "moves", None) or [])]
+        pps = list(getattr(active, "move_pp", None) or [])
+    except Exception:
+        return 0
+    best, best_pp = None, -1
+    for i, (mv, pp) in enumerate(zip(moves, pps)):
+        if not mv or mv == "none" or pp <= 0 or mv in _STATUS_MOVE_NAMES:
+            continue
+        if pp > best_pp:
+            best, best_pp = i, pp
+    return best if best is not None else 0
+
+
+def _battle_in_wrong_submenu(env: Any) -> bool:
+    """True on the in-battle POKéMON/BAG submenu — a full olive-green screen, vs the
+    battle scene which is black/sprite there. Blind menu sequences sometimes land
+    here; we back out with B rather than getting stuck choosing a Pokémon/item."""
+    arr = _starter_frame_rgb(env)
+    if arr is None:
+        return False
+    r, g, b = _region_mean(arr, 180, 235, 60, 100)
+    return r > 150 and g > 160 and b < 145 and abs(r - g) < 35
+
+
+def _battle_state(env: Any) -> str:
+    """Which battle screen is up: 'submenu' (Pokémon/Bag), 'move' (move-select),
+    'action' (FIGHT/BAG/POKéMON/RUN), or 'message' (text/animation).
+
+    The action menu shows a white box bottom-RIGHT (the FIGHT.. options); the move
+    menu shows a white box bottom-LEFT (the move names). Everything else is the teal
+    battle field / a message box, where we just advance text.
+    """
+    if _battle_in_wrong_submenu(env):
+        return "submenu"
+    arr = _starter_frame_rgb(env)
+    if arr is None:
+        return "message"
+    if all(c > 200 for c in _region_mean(arr, 8, 115, 120, 155)):
+        return "move"
+    if all(c > 200 for c in _region_mean(arr, 150, 235, 120, 155)):
+        return "action"
+    return "message"
+
+
+def _battle_menu_action(state: dict[str, Any], mode: str) -> str:
+    """Visual battle-menu state machine. Detects the current screen each step and
+    pins the cursor to the target (FIGHT/RUN, then the chosen move). The per-screen
+    step resets whenever the screen changes, so it never drifts out of phase with
+    variable-length battle text (the failure mode of blind button sequences)."""
+    env = state.get("_env")
+    st = _battle_state(env)
+    if state.get("_battle_ui_state") != st:
+        state["_battle_ui_state"] = st
+        state["_battle_ui_step"] = 0
+    if st == "submenu":
+        return "b"  # backed into Pokémon/Bag by mistake — return to the action menu
+    if st == "message":
+        return "a"  # advance text / animation
+    if st == "move" and mode == "run":
+        return "b"  # opened FIGHT while trying to flee — back out
+    if st == "action":
+        # main-menu 2x2: FIGHT(0,0) BAG(0,1) / POKéMON(1,0) RUN(1,1).
+        seq = ("up", "left", "a") if mode == "fight" else ("down", "right", "a")
+    else:  # move-select menu (fight mode): pin to the chosen move's slot, then A.
+        slot = _best_move_slot(env)
+        seq = ("up" if slot < 2 else "down", "left" if slot % 2 == 0 else "right", "a")
+    step = state.get("_battle_ui_step", 0)
+    state["_battle_ui_step"] = step + 1
+    return seq[min(step, len(seq) - 1)]
+
+
 def handle_battle(state: dict[str, Any], strategy: str = "fight") -> str:
-    # Deterministic simple policies. For Mudkip/Roxanne, Water Gun is usually move slot 4 in Heatz assumptions.
-    if strategy == "run" and _is_trainer_battle(state.get("_env")):
-        # Trainer battles can't be fled, so fight through instead of looping on a dead run.
-        strategy = "fight"
-    if strategy == "water_gun":
-        prev = state.get("_water_gun_prev_action")
-        if prev is None:
-            state["_water_gun_prev_action"] = "a"
-            return "a"
-        if prev == "a":
-            state["_water_gun_prev_action"] = "right"
-            return "right"
-        if prev == "right":
-            state["_water_gun_prev_action"] = "down"
-            return "down"
-        state["_water_gun_prev_action"] = "a"
-        return "a"
-    if strategy == "run":
-        return _next_sequence_action(state, "_battle_run_step", ("a", "right", "down", "a"), repeat_last=False)
-    # fight: just press A. Trainer battles are detected up front (we never navigate to
-    # RUN in one), so the menu cursor stays on FIGHT and mashing A picks the first move
-    # each turn — the fastest win, which also minimises chip damage taken.
-    return "a"
+    # Flee wild battles; fight trainers (unfleeable) and gym leaders. "water_gun"
+    # collapses to fight — the move picker chooses Water Gun when it's the best move.
+    mode = "run" if (strategy == "run" and not _is_trainer_battle(state.get("_env"))) else "fight"
+    return _battle_menu_action(state, mode)
 
 
 def _as_int(value: Any) -> int | None:
@@ -430,28 +495,43 @@ def _facing_matches_action(facing: str | None, action: str) -> bool:
 _DIR_DELTA = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
 
 
-def _nav_memory(state: dict[str, Any], x: int, y: int, facing: Any, loc: Any) -> dict:
-    """Per-map memory of tiles we bumped into.
+# gObjectEvents: 16 active-map object slots (slot 0 is the player). Each entry is
+# 0x24 bytes; currentCoords are s16 at 0x10 (x) / 0x12 (y), stored as map coord +
+# MAP_OFFSET(7). The high-level reader's object-event API returns nothing for this
+# ROM, so we read the table directly — exact, dynamic, no bump-inference needed.
+_GOBJECT_EVENTS_ADDR = 0x02037350
+_GOBJECT_EVENT_SIZE = 0x24
+_GOBJECT_EVENT_COUNT = 16
+_MAP_OFFSET = 7
 
-    Trainers and other NPCs block tiles but are absent from the static collision
-    map (object-event memory is often unreadable mid-route), so the pathfinder
-    walks straight into them. We learn a tile is blocked when a directional move
-    we were *already facing* failed to change our position (a first press toward a
-    new facing only turns in place, so facing must already match to count as a
-    real bump). Reset when the map changes.
+
+def _npc_blocked_tiles(env: Any, exclude_xy: tuple[int, int] | None = None) -> list[tuple[int, int]]:
+    """Live (x, y) tiles occupied by NPCs/trainers, read from gObjectEvents.
+
+    NPCs block tiles but are absent from the static collision map; reading the
+    object table is exact (vs. inferring blocks from movement bumps, which misfires
+    when trainer spot/battle cutscenes freeze the player on a walkable tile).
     """
-    nav = state.get("_nav_obstacles")
-    if not isinstance(nav, dict) or nav.get("loc") != loc:
-        nav = {"loc": loc, "blocked": [], "last": None}
-    last = nav.get("last")
-    if last is not None:
-        lx, ly, lfacing, lact = last
-        if (lx, ly) == (x, y) and lact in _DIR_DELTA and _facing_matches_action(lfacing, lact):
-            dx, dy = _DIR_DELTA[lact]
-            tile = [x + dx, y + dy]
-            if tile not in nav["blocked"]:
-                nav["blocked"].append(tile)
-    return nav
+    core = getattr(env, "core", None)
+    if core is None:
+        return []
+    try:
+        mem = core.memory
+        tiles: list[tuple[int, int]] = []
+        for i in range(_GOBJECT_EVENT_COUNT):
+            a = _GOBJECT_EVENTS_ADDR + i * _GOBJECT_EVENT_SIZE
+            if not (mem.u8[a] & 1):  # active bit
+                continue
+            cx, cy = mem.u16[a + 0x10], mem.u16[a + 0x12]
+            cx = cx - 0x10000 if cx >= 0x8000 else cx
+            cy = cy - 0x10000 if cy >= 0x8000 else cy
+            tile = (cx - _MAP_OFFSET, cy - _MAP_OFFSET)
+            if exclude_xy is not None and tile == exclude_xy:
+                continue
+            tiles.append(tile)
+        return tiles
+    except Exception:
+        return []
 
 
 def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fallback: bool = False, max_distance: int = 150) -> str:
@@ -465,43 +545,34 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
     x, y, goal_x, goal_y = int(x), int(y), int(goal_x), int(goal_y)
     facing = state.get("facing") or (state.get("player") or {}).get("facing")
 
-    loc = (state.get("map") or {}).get("location")
-    nav = _nav_memory(state, x, y, facing, loc)
-    blocked = nav["blocked"]
-
-    def _remember(action: str | None) -> str:
-        nav["last"] = (x, y, facing, action) if action in _DIR_DELTA else None
-        state["_nav_obstacles"] = nav
-        return action if action is not None else "no_op"
+    # Block the live NPC/trainer tiles (the static collision map omits them).
+    blocked = _npc_blocked_tiles(state.get("_env"), exclude_xy=(x, y))
 
     # Heatz's original pathfinding interacts with adjacent NPC/object goals.
     # Several generated policies target object coordinates, e.g. Birch's bag.
     adjacent_action = _direction_to_adjacent(x, y, goal_x, goal_y)
     if adjacent_action and _goal_object_at(state, goal_x, goal_y):
         if _facing_matches_action(facing, adjacent_action):
-            _remember(None)  # interacting; no movement to track
             return "a"
-        return _remember(adjacent_action)
+        return adjacent_action
 
     try:
         from utils.mapping.pathfinding import Pathfinder
 
-        # Route around dynamically-discovered obstacles (e.g. trainers) that the
-        # static collision map misses. blocked_coords=None preserves prior behaviour.
         path = Pathfinder().find_path(
             (x, y),
             (goal_x, goal_y),
             state,
             max_distance=max_distance,
             allow_partial=True,
-            blocked_coords=[tuple(t) for t in blocked] or None,
+            blocked_coords=blocked or None,
         )
         if path:
-            return _remember(str(path[0]).lower())
+            return str(path[0]).lower()
     except Exception as exc:
         logger.debug("Pathfinding failed: %s", exc)
 
-    # Greedy fallback toward the goal, then any escape, always skipping known blocks.
+    # Greedy fallback toward the goal, then any escape, skipping NPC tiles.
     prefs: list[str] = []
     if goal_x < x:
         prefs.append("left")
@@ -513,9 +584,9 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
         prefs.append("down")
     for cand in (*prefs, "down", "up", "left", "right"):
         dx, dy = _DIR_DELTA[cand]
-        if [x + dx, y + dy] not in blocked:
-            return _remember(cand)
-    return _remember(None)
+        if (x + dx, y + dy) not in blocked:
+            return cand
+    return "no_op"
 
 
 def log(message: object) -> None:
@@ -654,7 +725,7 @@ class HeatzPolicy:
             action = self.run_fn(state)
         # Preserve tiny state-machine scratch keys used by helper policies.
         for key, value in state.items():
-            if key.startswith(("_water_gun", "_ui_", "_battle_", "_nav")):
+            if key.startswith(("_water_gun", "_ui_", "_battle_")):
                 self._scratch[key] = value
         try:
             return normalize_action(action)
