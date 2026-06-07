@@ -10,6 +10,11 @@ import time
 import argparse
 import subprocess
 import signal
+import threading
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -140,6 +145,23 @@ def start_server(args, run_id=None):
 
     if args.record:
         server_cmd.append("--record")
+
+    if getattr(args, "collect_dataset", False):
+        server_cmd.append("--collect-dataset")
+    if getattr(args, "dataset_output_dir", None):
+        server_cmd.extend(["--dataset-output-dir", args.dataset_output_dir])
+    if getattr(args, "dataset_state_interval", None):
+        server_cmd.extend(["--dataset-state-interval", str(args.dataset_state_interval)])
+    if getattr(args, "dataset_max_seconds", None) is not None:
+        server_cmd.extend(["--dataset-max-seconds", str(args.dataset_max_seconds)])
+    if getattr(args, "dataset_frame_writer_workers", None) is not None:
+        server_cmd.extend(["--dataset-frame-writer-workers", str(args.dataset_frame_writer_workers)])
+    if getattr(args, "dataset_png_compress_level", None) is not None:
+        server_cmd.extend(["--dataset-png-compress-level", str(args.dataset_png_compress_level)])
+    if getattr(args, "dataset_compact_state_mode", None):
+        server_cmd.extend(["--dataset-compact-state-mode", args.dataset_compact_state_mode])
+    if getattr(args, "terminate_on_first_badge", False):
+        server_cmd.append("--terminate-on-first-badge")
     
     if args.load_checkpoint:
         # Auto-load checkpoint.state when --load-checkpoint is used
@@ -196,7 +218,7 @@ def start_server(args, run_id=None):
 def start_frame_server(port):
     """Start the lightweight frame server for stream.html visualization"""
     try:
-        frame_cmd = ["python", "-m", "server.frame_server", "--port", str(port+1)]
+        frame_cmd = [sys.executable, "-m", "server.frame_server", "--port", str(port+1)]
         frame_process = subprocess.Popen(
             frame_cmd,
             stdout=subprocess.PIPE,
@@ -207,6 +229,54 @@ def start_frame_server(port):
     except Exception as e:
         print(f"⚠️ Could not start frame server: {e}")
         return None
+
+
+def _termination_condition_met(server_url: str, condition_type: str = "gym_badge_count", threshold: int = 1) -> bool:
+    try:
+        response = requests.get(
+            f"{server_url}/termination_condition",
+            params={"condition_type": condition_type, "threshold": threshold},
+            timeout=5,
+        )
+        if response.status_code != 200:
+            return False
+        data = response.json()
+        return bool(data.get("condition_met"))
+    except Exception:
+        return False
+
+
+def _request_server_stop(server_url: str) -> None:
+    try:
+        requests.post(f"{server_url}/stop", timeout=5)
+    except Exception:
+        pass
+
+
+def _run_agent_with_termination_monitor(agent, args) -> int:
+    """Run agent in a daemon thread while monitoring first-badge termination."""
+    server_url = f"http://localhost:{args.port}"
+    result = {"code": None}
+
+    def _target():
+        try:
+            result["code"] = agent.run()
+        except Exception as exc:
+            print(f"❌ Agent thread failed: {exc}")
+            result["code"] = 1
+
+    agent_thread = threading.Thread(target=_target, name="pokeagent-runner", daemon=True)
+    agent_thread.start()
+
+    while agent_thread.is_alive():
+        if _termination_condition_met(server_url, "gym_badge_count", 1):
+            print("🏁 First badge termination condition met; stopping agent run")
+            _request_server_stop(server_url)
+            agent_thread.join(timeout=10)
+            return 0
+        time.sleep(2)
+
+    return int(result["code"] if result["code"] is not None else 0)
 
 
 def start_custom_agent(agent_config, args):
@@ -285,6 +355,9 @@ def start_custom_agent(agent_config, args):
     agent = agent_class(**agent_kwargs)
     print("✅ Agent created", flush=True)
 
+    if getattr(args, "terminate_on_first_badge", False):
+        return _run_agent_with_termination_monitor(agent, args)
+
     return agent.run()
 
 
@@ -326,12 +399,30 @@ def main():
                        help="Run without pygame display (headless)")
     parser.add_argument("--agent-auto", action="store_true", 
                        help="Agent acts automatically")
+    parser.add_argument("--max-steps", type=int, default=None,
+                       help="Stop the autonomous agent after this many model/tool steps")
     parser.add_argument("--manual", action="store_true", 
                        help="Start in manual mode instead of agent mode")
     
     # Features
     parser.add_argument("--record", action="store_true", 
                        help="Record video of the gameplay")
+    parser.add_argument("--collect-dataset", action="store_true",
+                       help="Record PNG frames plus per-frame action/state JSONL for dataset collection")
+    parser.add_argument("--dataset-output-dir", type=str, default=None,
+                       help="Dataset output root or episode directory")
+    parser.add_argument("--dataset-state-interval", type=int, default=1,
+                       help="Write one state row every N frames")
+    parser.add_argument("--dataset-max-seconds", type=float, default=None,
+                       help="Stop dataset collection after this many seconds")
+    parser.add_argument("--dataset-frame-writer-workers", type=int, default=4,
+                       help="Number of background workers for PNG frame writes (default: 4; lower is safer for many parallel runs)")
+    parser.add_argument("--dataset-png-compress-level", type=int, default=6,
+                       help="PNG compression level 0-9 for dataset frames (default: 6 for storage)")
+    parser.add_argument("--dataset-compact-state-mode", type=str, default="fast", choices=["fast", "comprehensive"],
+                       help="State row source: fast direct memory reads or old comprehensive state reader")
+    parser.add_argument("--terminate-on-first-badge", action="store_true",
+                       help="Stop the run when the first badge is detected")
     parser.add_argument("--no-ocr", action="store_true", default=True,
                        help="Disable OCR dialogue detection")
     parser.add_argument("--direct-objectives", type=str,
@@ -512,6 +603,10 @@ def main():
             print("   OCR: Disabled")
         if args.record:
             print("   Recording: Enabled")
+        if args.collect_dataset:
+            print("   Dataset collection: Enabled")
+        if args.terminate_on_first_badge:
+            print("   Termination: first badge")
         
         print(f"🎥 Stream View: http://127.0.0.1:{args.port}/stream")
 

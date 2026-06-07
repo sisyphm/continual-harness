@@ -23,6 +23,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 import uvicorn
 from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -40,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Local application imports — emulator imported conditionally in setup_environment()
 from utils.anticheat import AntiCheatTracker
+from utils.data_collection.episode_recorder import EpisodeRecorder
 from utils.json_utils import normalize_replan_edits
 from utils.llm_provider_ui import infer_llm_provider_family
 
@@ -68,6 +72,18 @@ _debug_state_counter = 0  # Step index for debug state entries
 _debug_state_log = []  # Accumulates all debug state snapshots (written to debug_states.json)
 current_obs = None
 fps = 80
+dataset_recorder = None
+dataset_collection_enabled = False
+dataset_state_interval = 1
+dataset_terminate_on_first_badge = False
+dataset_max_seconds = None
+dataset_start_time = None
+dataset_terminal_reason = None
+dataset_terminal_details = {}
+dataset_terminal_success = False
+first_badge_stable_frames = 0
+FIRST_BADGE_REQUIRED_STABLE_FRAMES = 5
+run_data_finalized = False
 
 
 def _is_simplest_scaffold() -> bool:
@@ -149,6 +165,9 @@ last_fps_log = time.time()
 frame_count_since_log = 0
 action_queue = []  # Queue for multi-action sequences (now stores dicts with timing info)
 current_action = None  # Current action being held
+current_action_metadata = {}  # Dataset/request metadata for current action
+release_action_metadata = {}  # Dataset/request metadata for release frames
+action_request_counter = 0  # Monotonic request id for dataset alignment
 action_frames_remaining = 0  # Frames left to hold current action
 release_frames_remaining = 0  # Frames left to wait after release
 current_action_release_delay = 0  # Release delay for current action
@@ -487,87 +506,358 @@ def periodic_milestone_updater():
             time.sleep(5.0)  # Wait longer on error
 
 
+def _sha1_file(path: str) -> Optional[str]:
+    try:
+        sha1 = hashlib.sha1()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                sha1.update(chunk)
+        return sha1.hexdigest()
+    except Exception as exc:
+        logger.debug(f"Failed to hash ROM {path}: {exc}")
+        return None
+
+
+def _next_episode_dir(dataset_root: Path) -> Path:
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    for idx in range(1, 10000):
+        candidate = dataset_root / f"episode_{idx:06d}"
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Could not allocate dataset episode directory under {dataset_root}")
+
+
+def init_dataset_recording(args, run_manager):
+    """Initialize frame/action dataset collection for the current run."""
+    global dataset_recorder, dataset_collection_enabled, dataset_state_interval
+    global dataset_terminate_on_first_badge, dataset_max_seconds, dataset_start_time
+    global first_badge_stable_frames
+
+    dataset_collection_enabled = bool(getattr(args, "collect_dataset", False))
+    dataset_state_interval = max(1, int(getattr(args, "dataset_state_interval", 1) or 1))
+    dataset_terminate_on_first_badge = bool(getattr(args, "terminate_on_first_badge", False))
+    dataset_max_seconds = getattr(args, "dataset_max_seconds", None)
+    dataset_frame_writer_workers = getattr(args, "dataset_frame_writer_workers", None)
+    dataset_png_compress_level = getattr(args, "dataset_png_compress_level", 6)
+    dataset_compact_state_mode = getattr(args, "dataset_compact_state_mode", "fast")
+    dataset_start_time = time.time() if dataset_collection_enabled else None
+    first_badge_stable_frames = 0
+
+    if not dataset_collection_enabled:
+        return
+
+    output_dir = getattr(args, "dataset_output_dir", None)
+    if output_dir:
+        output_path = Path(output_dir)
+        episode_dir = output_path if output_path.name.startswith("episode_") else _next_episode_dir(output_path)
+    else:
+        episode_dir = _next_episode_dir(run_manager.run_dir / "dataset")
+
+    rom_path = "PokemonRed-GBC/pokered.gbc" if game_type == "red" else "Emerald-GBAdvance/rom.gba"
+    dataset_recorder = EpisodeRecorder(
+        episode_dir,
+        run_id=run_manager.run_id,
+        game=game_type,
+        rom_path=rom_path,
+        rom_sha1=_sha1_file(rom_path),
+        state_interval=dataset_state_interval,
+        fps_target=fps,
+        frame_writer_workers=dataset_frame_writer_workers,
+        png_compress_level=dataset_png_compress_level,
+        compact_state_mode=dataset_compact_state_mode,
+        metadata={
+            "terminate_on_first_badge": dataset_terminate_on_first_badge,
+            "dataset_max_seconds": dataset_max_seconds,
+            "dataset_frame_writer_workers": dataset_frame_writer_workers,
+            "dataset_png_compress_level": dataset_png_compress_level,
+            "dataset_compact_state_mode": dataset_compact_state_mode,
+            "source": "server.app",
+        },
+    )
+    print(
+        f"🧾 Dataset recording enabled: {dataset_recorder.episode_dir} "
+        f"(frame_writer_workers={dataset_recorder.frame_writer_workers}, "
+        f"png_compress_level={dataset_recorder.png_compress_level}, "
+        f"compact_state_mode={dataset_recorder.compact_state_mode})"
+    )
+
+
+def record_dataset_initial_frame():
+    if not dataset_recorder or env is None:
+        return
+    try:
+        screenshot = env.get_screenshot()
+        if screenshot:
+            dataset_recorder.record_initial_frame(screenshot, env=env)
+            print("🧾 Dataset initial frame recorded")
+    except Exception as exc:
+        logger.warning(f"Dataset initial frame failed: {exc}")
+
+
+def _build_dataset_action_context(phase: str, action: Optional[str], metadata: Optional[Dict[str, Any]], queue_length: int) -> Dict[str, Any]:
+    data = dict(metadata or {})
+    return {
+        "phase": phase,
+        "current_action": action,
+        "request_id": data.get("request_id"),
+        "sequence_index": data.get("sequence_index"),
+        "sequence_length": data.get("sequence_length"),
+        "queue_length": queue_length,
+        "speed": data.get("speed"),
+        "hold_frames": data.get("hold_frames"),
+        "release_frames": data.get("release_frames"),
+        "source": data.get("source"),
+        "metadata": data.get("metadata") or {},
+    }
+
+
+def _safe_termination_call(obj, method_name: str, default=None):
+    if obj is None or not hasattr(obj, method_name):
+        return default
+    try:
+        return getattr(obj, method_name)()
+    except Exception as exc:
+        logger.debug(f"Termination state read failed for {method_name}: {exc}")
+        return default
+
+
+def _normalise_location_name(location: Any) -> str:
+    return str(location or "").upper().replace("_", " ")
+
+
+def get_first_badge_status() -> Dict[str, Any]:
+    """Return a conservative first-gym-clear condition.
+
+    Raw badge memory occasionally produces one-frame corrupt reads. Do not stop an
+    episode unless the Stone badge appears in a plausible Rustboro Gym context for
+    several consecutive checks.
+    """
+    global first_badge_stable_frames
+
+    badges = []
+    badge_count = 0
+    stone_badge_memory = False
+    stone_badge_milestone = False
+    rustboro_gym_milestone = False
+    location = None
+    money = None
+    coordinates = None
+    in_battle = False
+    validation_errors = []
+
+    reader = getattr(env, "memory_reader", None) if env is not None else None
+    if reader is not None:
+        badges = _safe_termination_call(reader, "read_badges", []) or []
+        badge_count = len(badges) if isinstance(badges, list) else 0
+        location = _safe_termination_call(reader, "read_location", None)
+        money = _safe_termination_call(reader, "read_money", None)
+        coordinates = _safe_termination_call(reader, "read_coordinates", None)
+        in_battle = bool(_safe_termination_call(reader, "is_in_battle", False))
+
+    if env is not None:
+        if location in (None, "", "Unknown"):
+            location = _safe_termination_call(env, "get_location", location)
+        if money is None:
+            money = _safe_termination_call(env, "get_money", None)
+        if coordinates is None:
+            coordinates = _safe_termination_call(env, "get_coordinates", None)
+
+    if env is not None and hasattr(env, "milestone_tracker"):
+        try:
+            stone_badge_milestone = bool(env.milestone_tracker.is_completed("STONE_BADGE"))
+        except Exception:
+            stone_badge_milestone = False
+        try:
+            rustboro_gym_milestone = bool(env.milestone_tracker.is_completed("RUSTBORO_GYM_ENTERED"))
+        except Exception:
+            rustboro_gym_milestone = False
+
+    location_upper = _normalise_location_name(location)
+    rustboro_gym_location = "RUSTBORO" in location_upper and "GYM" in location_upper
+    location_unknown = location_upper in ("", "UNKNOWN", "NONE")
+    rustboro_gym_context = rustboro_gym_location or (location_unknown and rustboro_gym_milestone)
+    stone_badge_memory = any("stone" in str(badge).lower() for badge in badges)
+
+    sane_money = money is None or (isinstance(money, int) and 0 <= money <= 999999)
+    if not sane_money:
+        validation_errors.append("money_out_of_range")
+
+    x = y = None
+    if isinstance(coordinates, dict):
+        x, y = coordinates.get("x"), coordinates.get("y")
+    elif isinstance(coordinates, (list, tuple)) and len(coordinates) >= 2:
+        x, y = coordinates[0], coordinates[1]
+    sane_coordinates = (
+        x is None
+        or y is None
+        or (isinstance(x, int) and isinstance(y, int) and 0 <= x <= 255 and 0 <= y <= 255)
+    )
+    if not sane_coordinates:
+        validation_errors.append("coordinates_out_of_range")
+
+    if not stone_badge_memory:
+        validation_errors.append("stone_badge_not_in_memory")
+    if not rustboro_gym_context:
+        validation_errors.append("not_in_rustboro_gym_context")
+    if in_battle:
+        validation_errors.append("still_in_battle")
+
+    candidate_met = bool(
+        stone_badge_memory
+        and rustboro_gym_context
+        and sane_money
+        and sane_coordinates
+        and not in_battle
+    )
+    if candidate_met:
+        first_badge_stable_frames += 1
+    else:
+        first_badge_stable_frames = 0
+
+    condition_met = first_badge_stable_frames >= FIRST_BADGE_REQUIRED_STABLE_FRAMES
+
+    return {
+        "badge_count": badge_count,
+        "badge_names": badges,
+        "stone_badge": stone_badge_memory,
+        "stone_badge_milestone": stone_badge_milestone,
+        "rustboro_gym_location": rustboro_gym_location,
+        "rustboro_gym_milestone": rustboro_gym_milestone,
+        "rustboro_gym_context": rustboro_gym_context,
+        "location": location,
+        "money": money,
+        "coordinates": {"x": x, "y": y} if x is not None or y is not None else None,
+        "in_battle": in_battle,
+        "sane_money": sane_money,
+        "sane_coordinates": sane_coordinates,
+        "candidate_met": candidate_met,
+        "stable_frames": first_badge_stable_frames,
+        "required_stable_frames": FIRST_BADGE_REQUIRED_STABLE_FRAMES,
+        "validation_errors": validation_errors,
+        "condition_met": condition_met,
+    }
+
+
+def check_dataset_termination(frame_idx: int) -> bool:
+    """Return True when dataset collection should stop the server loop."""
+    global dataset_terminal_reason, dataset_terminal_details, dataset_terminal_success
+
+    if dataset_max_seconds and dataset_start_time and time.time() - dataset_start_time >= dataset_max_seconds:
+        dataset_terminal_reason = "max_seconds"
+        dataset_terminal_details = {"dataset_max_seconds": dataset_max_seconds}
+        dataset_terminal_success = False
+        if dataset_recorder:
+            dataset_recorder.record_terminal_event(
+                frame_idx,
+                reason=dataset_terminal_reason,
+                success=False,
+                details=dataset_terminal_details,
+            )
+        return True
+
+    if dataset_terminate_on_first_badge:
+        status = get_first_badge_status()
+        if status.get("condition_met"):
+            dataset_terminal_reason = "first_badge"
+            dataset_terminal_details = status
+            dataset_terminal_success = True
+            if dataset_recorder:
+                dataset_recorder.record_terminal_event(
+                    frame_idx,
+                    reason=dataset_terminal_reason,
+                    success=True,
+                    details=status,
+                )
+            return True
+
+    return False
+
+
+def finalize_run_data(reason: str = "shutdown", success: Optional[bool] = None, details: Optional[Dict[str, Any]] = None):
+    """Finalize run_data and dataset artifacts exactly once."""
+    global run_data_finalized
+
+    if run_data_finalized:
+        return
+    run_data_finalized = True
+
+    was_recording = video_recording
+    final_reason = dataset_terminal_reason or reason
+    final_success = dataset_terminal_success if success is None else success
+    final_details = dict(dataset_terminal_details or {})
+    if details:
+        final_details.update(details)
+
+    try:
+        from utils.data_persistence.run_data_manager import get_run_data_manager, get_cache_path
+        from utils.data_persistence.llm_logger import get_llm_logger
+
+        run_manager = get_run_data_manager()
+        llm_logger = get_llm_logger()
+        final_metrics = llm_logger.get_cumulative_metrics() if llm_logger else None
+
+        if dataset_recorder:
+            llm_log_path = getattr(llm_logger, "log_file", None) if llm_logger else None
+            dataset_recorder.copy_auxiliary_files(
+                trajectory_path=get_cache_path("trajectory_history.jsonl"),
+                submission_log_path=get_cache_path("submission.log"),
+                llm_log_path=llm_log_path,
+            )
+            dataset_recorder.finalize(
+                end_reason=final_reason,
+                success=bool(final_success),
+                details=final_details,
+            )
+            print(f"🧾 Dataset finalized: {dataset_recorder.episode_dir}")
+
+        if run_manager:
+            print("📦 Finalizing run data...")
+            run_manager.save_end_state_snapshot()
+
+            logger.info(f"🔍 [DEBUG] Finalizing run data - run_manager: {run_manager is not None}")
+            if llm_logger:
+                logger.info(f"🔍 [DEBUG] LLM logger available, log_file: {llm_logger.log_file}")
+                if os.path.exists(llm_logger.log_file):
+                    run_manager.copy_llm_traces(llm_logger.log_file)
+                    logger.info(f"🔍 [DEBUG] Copied LLM traces from: {llm_logger.log_file}")
+                else:
+                    logger.warning(f"🔍 [DEBUG] LLM log file not found: {llm_logger.log_file}")
+                    log_pattern = f"llm_logs/llm_log_{run_manager.run_id.split('_', 1)[1] if '_' in run_manager.run_id else '*'}*.jsonl"
+                    log_files = glob.glob(log_pattern)
+                    if log_files:
+                        log_file = max(log_files, key=os.path.getmtime)
+                        run_manager.copy_llm_traces(log_file)
+                        logger.info(f"🔍 [DEBUG] Found and copied LLM traces from: {log_file}")
+            else:
+                logger.warning("🔍 [DEBUG] LLM logger is None - cannot copy LLM traces")
+
+            if os.environ.get("POKEAGENT_CLI_MODE") != "1":
+                run_manager.copy_objectives()
+                run_manager.copy_memory()
+
+            run_manager.sync_trajectories_to_run_data()
+            run_manager.copy_frame_cache()
+            run_manager.copy_video_recording(record_enabled=was_recording)
+            run_manager.finalize_run(final_metrics=final_metrics)
+            print(f"✅ Run data finalized: {run_manager.get_run_directory()}")
+    except Exception as exc:
+        logger.error(f"❌ Error during run data finalization: {exc}", exc_info=True)
+    finally:
+        cleanup_video_recording()
+
+
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
-    global running, state_update_running, video_recording, video_filename
+    global running, state_update_running
 
-    # Prevent multiple signal handlers from running simultaneously
-    if not running:
+    if not running and run_data_finalized:
         return
 
     print(f"\nReceived signal {signum}, shutting down gracefully...")
     running = False
     state_update_running = False
 
-    # IMPORTANT: Finalize run data BEFORE cleanup
-    # Check video_recording flag BEFORE cleanup_video_recording() resets it
-    was_recording = video_recording
-
-    try:
-        from utils.data_persistence.run_data_manager import get_run_data_manager
-        from utils.data_persistence.llm_logger import get_llm_logger
-
-        run_manager = get_run_data_manager()
-        if run_manager:
-            print("📦 Finalizing run data...")
-
-            # Get final metrics from LLM logger
-            llm_logger = get_llm_logger()
-            final_metrics = llm_logger.get_cumulative_metrics() if llm_logger else None
-
-            # Save end-state snapshot (ensures all data is saved)
-            run_manager.save_end_state_snapshot()
-
-            # Copy all data to run_data
-            logger.info(f"🔍 [DEBUG] Finalizing run data - run_manager: {run_manager is not None}")
-            if llm_logger:
-                logger.info(f"🔍 [DEBUG] LLM logger available, log_file: {llm_logger.log_file}")
-                # Verify LLM log file exists before copying
-                if os.path.exists(llm_logger.log_file):
-                    logger.info(f"🔍 [DEBUG] LLM log file exists, copying...")
-                    run_manager.copy_llm_traces(llm_logger.log_file)
-                    logger.info(f"🔍 [DEBUG] Copied LLM traces from: {llm_logger.log_file}")
-                else:
-                    logger.warning(f"🔍 [DEBUG] LLM log file not found: {llm_logger.log_file}")
-                    logger.warning(f"🔍 [DEBUG] Current working directory: {os.getcwd()}")
-                    # Try to find the log file by pattern
-                    import glob
-
-                    log_pattern = f"llm_logs/llm_log_{run_manager.run_id.split('_', 1)[1] if '_' in run_manager.run_id else '*'}*.jsonl"
-                    logger.info(f"🔍 [DEBUG] Searching for log files with pattern: {log_pattern}")
-                    log_files = glob.glob(log_pattern)
-                    logger.info(f"🔍 [DEBUG] Found {len(log_files)} log files: {log_files}")
-                    if log_files:
-                        # Use the most recent one
-                        log_file = max(log_files, key=os.path.getmtime)
-                        logger.info(f"🔍 [DEBUG] Using most recent log file: {log_file}")
-                        run_manager.copy_llm_traces(log_file)
-                        logger.info(f"🔍 [DEBUG] Found and copied LLM traces from: {log_file}")
-            else:
-                logger.warning(f"🔍 [DEBUG] LLM logger is None - cannot copy LLM traces")
-
-            if os.environ.get("POKEAGENT_CLI_MODE") != "1":
-                run_manager.copy_objectives()
-                run_manager.copy_memory()
-
-            # Sync trajectories from cache to run_data before finalizing
-            run_manager.sync_trajectories_to_run_data()
-
-            # Copy frame_cache to end_state
-            run_manager.copy_frame_cache()
-
-            # Copy video if recording was enabled (check flag BEFORE cleanup)
-            logger.info(f"🔍 [DEBUG] Video recording flag: {was_recording}, video_filename: {video_filename}")
-            run_manager.copy_video_recording(record_enabled=was_recording)
-
-            # Finalize with metrics
-            run_manager.finalize_run(final_metrics=final_metrics)
-            print(f"✅ Run data finalized: {run_manager.get_run_directory()}")
-    except Exception as e:
-        logger.error(f"❌ Error during run data finalization: {e}", exc_info=True)
-
-    # Cleanup video recording AFTER copying (so file is still available)
-    cleanup_video_recording()
+    finalize_run_data(reason=f"signal_{signum}")
 
     if env:
         env.stop()
@@ -633,6 +923,8 @@ def handle_input(manual_mode=False):
 def step_environment(actions_pressed):
     """Take a step in the environment with optimized locking for better performance"""
     global current_obs
+
+    screenshot = None
 
     # Debug: print what actions are being sent to emulator
     # if actions_pressed:
@@ -726,6 +1018,8 @@ def step_environment(actions_pressed):
     except Exception as e:
         logger.warning(f"Error updating screenshot: {e}")
 
+    return screenshot
+
 
 def update_display(manual_mode=False):
     """Update display - server runs headless, no display update needed"""
@@ -780,8 +1074,10 @@ def game_loop(manual_mode=False):
 
         # In server mode, handle action queue with proper button hold timing
         action_completed = False
+        action_context = _build_dataset_action_context("idle", None, None, len(action_queue))
         if not manual_mode:
-            global current_action, action_frames_remaining, release_frames_remaining, current_action_release_delay
+            global current_action, current_action_metadata, release_action_metadata
+            global action_frames_remaining, release_frames_remaining, current_action_release_delay
 
             if current_action and action_frames_remaining > 0:
                 # Continue holding the current action (WAIT actions press nothing)
@@ -789,6 +1085,12 @@ def game_loop(manual_mode=False):
                     actions_pressed = []
                 else:
                     actions_pressed = [current_action]
+                action_context = _build_dataset_action_context(
+                    "wait" if current_action == "WAIT" else "hold",
+                    current_action,
+                    current_action_metadata,
+                    len(action_queue),
+                )
                 action_frames_remaining -= 1
                 if action_frames_remaining == 0:
                     # Action finished, start release delay
@@ -826,6 +1128,8 @@ def game_loop(manual_mode=False):
                                 recent_button_presses[i]["completed"] = True
                                 break
 
+                    release_action_metadata = dict(current_action_metadata)
+                    current_action_metadata = {}
                     current_action = None
                     release_frames_remaining = current_action_release_delay
                     action_completed = True  # Mark action as completed
@@ -833,7 +1137,10 @@ def game_loop(manual_mode=False):
             elif release_frames_remaining > 0:
                 # Release delay (no button pressed)
                 actions_pressed = []
+                action_context = _build_dataset_action_context("release", None, release_action_metadata, len(action_queue))
                 release_frames_remaining -= 1
+                if release_frames_remaining == 0:
+                    release_action_metadata = {}
             elif action_queue:
                 # Start a new action from the queue
                 current_action_data = action_queue.pop(0)
@@ -841,11 +1148,23 @@ def game_loop(manual_mode=False):
                 # Handle both old format (string) and new format (dict) for backward compatibility
                 if isinstance(current_action_data, str):
                     current_action = current_action_data
+                    speed = DEFAULT_SPEED
                     timing = SPEED_PRESETS[DEFAULT_SPEED]
+                    current_action_metadata = {"speed": speed}
                 else:
                     current_action = current_action_data["button"]
                     speed = current_action_data.get("speed", DEFAULT_SPEED)
                     timing = SPEED_PRESETS.get(speed, SPEED_PRESETS[DEFAULT_SPEED])
+                    current_action_metadata = {
+                        "request_id": current_action_data.get("request_id"),
+                        "sequence_index": current_action_data.get("sequence_index"),
+                        "sequence_length": current_action_data.get("sequence_length"),
+                        "speed": speed,
+                        "hold_frames": current_action_data.get("hold_frames"),
+                        "release_frames": current_action_data.get("release_frames"),
+                        "source": current_action_data.get("source"),
+                        "metadata": current_action_data.get("metadata") or {},
+                    }
 
                     # Allow explicit frame overrides
                     if current_action_data.get("hold_frames") is not None:
@@ -855,30 +1174,68 @@ def game_loop(manual_mode=False):
                         timing = timing.copy()
                         timing["release"] = current_action_data["release_frames"]
 
-                # Special handling for WAIT action
-                if current_action == "WAIT":
-                    action_frames_remaining = 0  # Don't actually hold any button
-                    current_action_release_delay = timing["release"]  # Wait duration is in release
+                current_action_metadata["hold_frames"] = timing["hold"]
+                current_action_metadata["release_frames"] = timing["release"]
+
+                # Special handling for WAIT action: queue a timed no-op with metadata.
+                is_wait_action = current_action == "WAIT"
+                if is_wait_action:
+                    action_frames_remaining = 0
+                    current_action_release_delay = 0
+                    release_frames_remaining = timing["release"]
+                    release_action_metadata = dict(current_action_metadata)
                 else:
-                    action_frames_remaining = timing["hold"]
+                    # The current loop iteration consumes the first held frame.
+                    action_frames_remaining = max(0, timing["hold"] - 1)
                     current_action_release_delay = timing["release"]
 
-                actions_pressed = [] if current_action == "WAIT" else [current_action]
+                actions_pressed = [] if is_wait_action else [current_action]
                 queue_len = len(action_queue)
+                action_context = _build_dataset_action_context(
+                    "wait" if is_wait_action else "hold",
+                    current_action,
+                    current_action_metadata,
+                    queue_len,
+                )
+                if is_wait_action:
+                    current_action_metadata = {}
+                    current_action = None
+                elif action_frames_remaining == 0:
+                    release_action_metadata = dict(current_action_metadata)
+                    current_action_metadata = {}
+                    current_action = None
+                    release_frames_remaining = current_action_release_delay
+                    action_completed = True
 
                 # Get current FPS for estimation
                 current_fps_for_calc = env.get_current_fps(fps) if env else fps
                 estimated_time = queue_len * (timing["hold"] + timing["release"]) / current_fps_for_calc
                 speed_indicator = f" [{speed}]" if isinstance(current_action_data, dict) else ""
+                display_action = action_context.get("current_action")
                 print(
-                    f"🎮 Server processing action: {current_action}{speed_indicator}, Queue remaining: {queue_len} actions (~{estimated_time:.1f}s)"
+                    f"🎮 Server processing action: {display_action}{speed_indicator}, Queue remaining: {queue_len} actions (~{estimated_time:.1f}s)"
                 )
             else:
                 # No action to process
                 actions_pressed = []
+                action_context = _build_dataset_action_context("idle", None, None, len(action_queue))
 
         # Step environment
-        step_environment(actions_pressed)
+        screenshot = step_environment(actions_pressed)
+
+        if dataset_recorder and screenshot is not None:
+            try:
+                dataset_recorder.record_transition(
+                    screenshot=screenshot,
+                    actions_pressed=actions_pressed,
+                    action_context=action_context,
+                    env=env,
+                )
+                if check_dataset_termination(dataset_recorder.frame_count - 1):
+                    print(f"🏁 Dataset termination reached: {dataset_terminal_reason}")
+                    running = False
+            except Exception as exc:
+                logger.warning(f"Dataset transition recording failed: {exc}")
 
         # Milestones are now updated in background thread
 
@@ -1087,7 +1444,7 @@ async def websocket_frames(websocket: WebSocket):
 @app.post("/action")
 async def take_action(request: ActionRequest):
     """Take an action"""
-    global current_obs, step_count, recent_button_presses, action_queue, anticheat_tracker, step_counter, last_action_time
+    global current_obs, step_count, recent_button_presses, action_queue, anticheat_tracker, step_counter, last_action_time, action_request_counter
 
     # print( Action endpoint called with request: {request}")
     # print( Request buttons: {request.buttons}")
@@ -1118,13 +1475,24 @@ async def take_action(request: ActionRequest):
             print(f"📡 Server received actions: {request.buttons}{speed_info}{frame_info}")
             print(f"📋 Action queue before extend: {action_queue}")
 
+            source = request.source
+            metadata = request.metadata or {}
+            sequence_length = len(request.buttons)
+            action_request_counter += 1
+            request_id = action_request_counter
+
             # Create action data with timing info
-            for button in request.buttons:
+            for idx, button in enumerate(request.buttons):
                 action_data = {
                     "button": button,
                     "speed": speed,
                     "hold_frames": hold_frames,
                     "release_frames": release_frames,
+                    "request_id": request_id,
+                    "sequence_index": idx,
+                    "sequence_length": sequence_length,
+                    "source": source,
+                    "metadata": dict(metadata),
                 }
                 action_queue.append(action_data)
 
@@ -1146,10 +1514,6 @@ async def take_action(request: ActionRequest):
                 # Skip expensive state read for large queues
                 start_pos = (None, None, "Unknown")
 
-            source = request.source
-            metadata = request.metadata or {}
-            sequence_length = len(request.buttons)
-
             for idx, button in enumerate(request.buttons):
                 # Add all buttons to recent actions with starting position
                 action_entry = {
@@ -1160,6 +1524,7 @@ async def take_action(request: ActionRequest):
                     "completed": False,
                     "sequence_index": idx,
                     "sequence_length": sequence_length,
+                    "request_id": request_id,
                 }
 
                 if source:
@@ -2318,10 +2683,20 @@ async def get_termination_condition(condition_type: str = "gym_badge_count", thr
     
     try:
         if condition_type == "gym_badge_count":
-            # Read badges directly from ROM memory (ground truth)
             badges = env.memory_reader.read_badges()
             badge_count = len(badges) if badges else 0
-            
+
+            if game_type == "emerald" and threshold == 1:
+                first_badge_status = get_first_badge_status()
+                return {
+                    "condition_type": condition_type,
+                    "threshold": threshold,
+                    "current_value": first_badge_status["badge_count"],
+                    "badge_names": first_badge_status["badge_names"],
+                    "condition_met": first_badge_status["condition_met"],
+                    "first_badge_status": first_badge_status,
+                }
+
             return {
                 "condition_type": condition_type,
                 "threshold": threshold,
@@ -3122,9 +3497,15 @@ async def mcp_press_buttons(request: dict):
     try:
         buttons = request.get("buttons", [])
         reasoning = request.get("reasoning", "")
-        source = request.get("source")
+        source = request.get("source") or "mcp_press_buttons"
+        speed = request.get("speed")
+        hold_frames = request.get("hold_frames")
+        release_frames = request.get("release_frames")
         metadata = request.get("metadata")
         metadata_dict = metadata if isinstance(metadata, dict) else {}
+        if reasoning and "reasoning" not in metadata_dict:
+            metadata_dict = dict(metadata_dict)
+            metadata_dict["reasoning"] = reasoning
 
         # Normalize buttons to always be a list
         if isinstance(buttons, str):
@@ -3189,20 +3570,20 @@ async def mcp_press_buttons(request: dict):
                 logger.warning(f"Invalid button '{button}' requested, falling back to 'A'")
                 normalized_buttons.append("A")
 
-        # Filter out WAIT buttons (they're just for agent decision-making, not actual button presses)
-        actual_buttons = [b for b in normalized_buttons if b != "WAIT"]
-
-        # If only WAIT was requested, treat it as a no-op but still complete successfully
-        if not actual_buttons:
-            logger.info(f"🎮 Agent chose to WAIT (no buttons pressed) - {reasoning}")
-            return {"success": True, "buttons_queued": [], "reasoning": reasoning, "action": "WAIT"}
-
-        # Call the existing take_action function to ensure metrics tracking
-        action_request = ActionRequest(buttons=actual_buttons, source=source, metadata=metadata_dict)
+        # Call the existing take_action function to ensure metrics tracking and dataset alignment.
+        # WAIT is a valid queued no-op; it produces frames with no buttons held but keeps timing metadata.
+        action_request = ActionRequest(
+            buttons=normalized_buttons,
+            speed=speed,
+            hold_frames=hold_frames,
+            release_frames=release_frames,
+            source=source,
+            metadata=metadata_dict,
+        )
         await take_action(action_request)
-        
-        logger.info(f"🎮 Queued buttons via MCP: {actual_buttons} - {reasoning}")
-        response_dict = {"success": True, "buttons_queued": actual_buttons, "reasoning": reasoning}
+
+        logger.info(f"🎮 Queued buttons via MCP: {normalized_buttons} - {reasoning}")
+        response_dict = {"success": True, "buttons_queued": normalized_buttons, "reasoning": reasoning}
 
         # Include warning if any buttons were invalid
         if invalid_buttons:
@@ -4320,7 +4701,16 @@ async def mcp_load_map(request: dict):
 @app.post("/stop")
 async def stop_server():
     """Stop the server"""
-    global running
+    global running, dataset_terminal_reason, dataset_terminal_success
+    if dataset_recorder and not dataset_terminal_reason:
+        status = get_first_badge_status()
+        if status.get("condition_met"):
+            dataset_terminal_reason = "first_badge"
+            dataset_terminal_details.update(status)
+            dataset_terminal_success = True
+        else:
+            dataset_terminal_reason = "manual_stop"
+            dataset_terminal_success = False
     running = False
     return {"status": "stopping"}
 
@@ -4642,6 +5032,14 @@ def main():
     parser.add_argument("--manual", action="store_true", help="Enable manual mode with keyboard input and overlay")
     parser.add_argument("--load-state", type=str, help="Load a saved state file on startup")
     parser.add_argument("--record", action="store_true", help="Record video of the gameplay")
+    parser.add_argument("--collect-dataset", action="store_true", help="Record PNG frames plus per-frame action/state JSONL for dataset collection")
+    parser.add_argument("--dataset-output-dir", type=str, default=None, help="Dataset output root or episode directory")
+    parser.add_argument("--dataset-state-interval", type=int, default=1, help="Write one state row every N frames")
+    parser.add_argument("--dataset-max-seconds", type=float, default=None, help="Stop dataset collection after this many seconds")
+    parser.add_argument("--dataset-frame-writer-workers", type=int, default=4, help="Number of background workers for PNG frame writes (default: 4; lower is safer for many parallel runs)")
+    parser.add_argument("--dataset-png-compress-level", type=int, default=6, help="PNG compression level 0-9 for dataset frames (default: 6 for storage)")
+    parser.add_argument("--dataset-compact-state-mode", type=str, default="fast", choices=["fast", "comprehensive"], help="State row source: fast direct memory reads or old comprehensive state reader")
+    parser.add_argument("--terminate-on-first-badge", action="store_true", help="Stop automatically when the first badge is detected")
     parser.add_argument("--no-ocr", action="store_true", help="Disable OCR dialogue detection")
     parser.add_argument(
         "--direct-objectives",
@@ -4772,6 +5170,7 @@ def main():
     run_name = os.environ.get("RUN_NAME")
     run_manager = initialize_run_data_manager(run_id=run_id, run_name=run_name)
     print(f"📁 Run data directory: {run_manager.get_run_directory()}")
+    init_dataset_recording(args, run_manager)
 
     # Only save metadata if this is a new run (not set by client)
     # If run_id was provided, metadata was already saved by client
@@ -4844,6 +5243,8 @@ def main():
             print(f"Failed to load state from {args.load_state}: {e}")
             print("Continuing with fresh game state...")
 
+    record_dataset_initial_frame()
+
     # Start lightweight milestone updater thread
     state_update_running = True
     state_update_thread = threading.Thread(target=periodic_milestone_updater, daemon=True)
@@ -4892,27 +5293,10 @@ def main():
     except Exception as e:
         print(f"Error: {e}")
     finally:
-        # Backup cleanup (in case signal handler didn't run or failed)
-        # The signal handler should handle most finalization, but this is a safety net
-        # Note: running and state_update_running are already declared as global at start of main()
-        was_running = running  # Read value before modifying
+        # Full finalization for normal loop exit, dataset termination, and fallback cleanup.
         running = False
         state_update_running = False
-
-        # Only run backup if we weren't already shutting down
-        # (signal handler should have handled it, but check if it actually did)
-        if was_running:
-            print("📦 Running backup finalization in finally block...")
-            try:
-                from utils.data_persistence.run_data_manager import get_run_data_manager
-
-                run_manager = get_run_data_manager()
-                if run_manager:
-                    # Quick finalization - just save end state snapshot
-                    run_manager.save_end_state_snapshot()
-                    print("✅ Backup finalization completed")
-            except Exception as e:
-                logger.error(f"❌ Error in backup finalization: {e}", exc_info=True)
+        finalize_run_data(reason="server_loop_exit")
 
         if env:
             env.stop()

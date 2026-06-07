@@ -90,6 +90,8 @@ class LLMLogger:
             "gpt-5-nano": {"prompt": 0.00005, "completion": 0.0004, "cached_prompt": 0.000005},  # $0.05/$0.40 per 1M, cached input $0.005 per 1M
             "gpt-5.1": {"prompt": 0.00125, "completion": 0.01, "cached_prompt": 0.000125},       # $1.25/$10 per 1M, cached input $0.125 per 1M
             "gpt-5.2": {"prompt": 0.00175, "completion": 0.014, "cached_prompt": 0.000175},       # $1.75/$14 per 1M, cached input $0.175 per 1M
+            "gpt-5.4": {"prompt": 0.0025, "completion": 0.015, "cached_prompt": 0.00025},           # $2.50/$15 per 1M, cached input $0.25 per 1M
+            "gpt-5.4-mini": {"prompt": 0.00075, "completion": 0.0045, "cached_prompt": 0.000075},  # $0.75/$4.50 per 1M, cached input $0.075 per 1M
             "gpt-5.2-pro": {"prompt": 0.021, "completion": 0.168},     # $21/$168 per 1M (no cached)
             "gpt-5-pro": {"prompt": 0.015, "completion": 0.12},        # $15/$120 per 1M (no cached)
             # GPT-5 chat-latest variants

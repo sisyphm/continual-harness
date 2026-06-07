@@ -26,6 +26,9 @@ from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -332,6 +335,23 @@ def start_server(args, run_id=None):
     # Pass through server-relevant arguments
     if hasattr(args, 'record') and args.record:
         server_cmd.append("--record")
+
+    if getattr(args, "collect_dataset", False):
+        server_cmd.append("--collect-dataset")
+    if getattr(args, "dataset_output_dir", None):
+        server_cmd.extend(["--dataset-output-dir", args.dataset_output_dir])
+    if getattr(args, "dataset_state_interval", None):
+        server_cmd.extend(["--dataset-state-interval", str(args.dataset_state_interval)])
+    if getattr(args, "dataset_max_seconds", None) is not None:
+        server_cmd.extend(["--dataset-max-seconds", str(args.dataset_max_seconds)])
+    if getattr(args, "dataset_frame_writer_workers", None) is not None:
+        server_cmd.extend(["--dataset-frame-writer-workers", str(args.dataset_frame_writer_workers)])
+    if getattr(args, "dataset_png_compress_level", None) is not None:
+        server_cmd.extend(["--dataset-png-compress-level", str(args.dataset_png_compress_level)])
+    if getattr(args, "dataset_compact_state_mode", None):
+        server_cmd.extend(["--dataset-compact-state-mode", args.dataset_compact_state_mode])
+    if getattr(args, "terminate_on_first_badge", False):
+        server_cmd.append("--terminate-on-first-badge")
     
     if hasattr(args, 'load_checkpoint') and args.load_checkpoint:
         from utils.data_persistence.run_data_manager import get_cache_path
@@ -350,8 +370,11 @@ def start_server(args, run_id=None):
     
     if hasattr(args, 'direct_objectives') and args.direct_objectives:
         server_cmd.extend(["--direct-objectives", args.direct_objectives])
+        server_env["HAS_DIRECT_OBJECTIVES"] = "1"
         if hasattr(args, 'direct_objectives_start') and args.direct_objectives_start > 0:
             server_cmd.extend(["--direct-objectives-start", str(args.direct_objectives_start)])
+        if hasattr(args, 'direct_objectives_battling_start') and args.direct_objectives_battling_start > 0:
+            server_cmd.extend(["--direct-objectives-battling-start", str(args.direct_objectives_battling_start)])
     
     # Start server as subprocess
     try:
@@ -376,7 +399,7 @@ def start_server(args, run_id=None):
 def start_frame_server(port):
     """Start the lightweight frame server for stream.html visualization."""
     try:
-        frame_cmd = ["python", "-m", "server.frame_server", "--port", str(port + 1)]
+        frame_cmd = [sys.executable, "-m", "server.frame_server", "--port", str(port + 1)]
         frame_process = subprocess.Popen(
             frame_cmd,
             stdout=subprocess.PIPE,
@@ -565,18 +588,21 @@ def _start_services(args, run_manager) -> Services | None:
     server_url = f"http://localhost:{args.port}"
 
     mcp_process = None
-    if args.mcp_sse_port is None:
-        args.mcp_sse_port = args.port + 2
-    print(f"\n🐳 Containerized mode (MCP SSE port {args.mcp_sse_port})")
-    project_root_for_mcp = str(Path(__file__).resolve().parent)
-    log_dir = Path(run_manager.get_run_directory()) / "agent_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    mcp_log = log_dir / "mcp_server.log"
-    mcp_process = start_mcp_sse_server(
-        server_url, args.mcp_sse_port, project_root_for_mcp, log_path=mcp_log
-    )
-    if not mcp_process:
-        return None
+    if getattr(args, "no_container", False):
+        print("\n💻 Local CLI mode (stdio MCP; no Docker)")
+    else:
+        if args.mcp_sse_port is None:
+            args.mcp_sse_port = args.port + 2
+        print(f"\n🐳 Containerized mode (MCP SSE port {args.mcp_sse_port})")
+        project_root_for_mcp = str(Path(__file__).resolve().parent)
+        log_dir = Path(run_manager.get_run_directory()) / "agent_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        mcp_log = log_dir / "mcp_server.log"
+        mcp_process = start_mcp_sse_server(
+            server_url, args.mcp_sse_port, project_root_for_mcp, log_path=mcp_log
+        )
+        if not mcp_process:
+            return None
 
     return Services(
         server=server_process,
@@ -649,6 +675,7 @@ def launch_cli_agent(
     mcp_sse_port: int | None = None,
     run_id: str | None = None,
     agent_memory_dir: str | None = None,
+    agent_model: str | None = None,
 ) -> CliSession:
     """Launch an external CLI agent session as subprocess using the given backend."""
     cmd, env, bootstrap, temp_mcp_config_path = backend.build_launch_cmd(
@@ -664,6 +691,7 @@ def launch_cli_agent(
         mcp_sse_port=mcp_sse_port,
         run_id=run_id,
         agent_memory_dir=agent_memory_dir,
+        agent_model=agent_model,
     )
     if directive_path:
         print(f"📜 Loaded directive from: {directive_path}")
@@ -751,7 +779,10 @@ def _run_agent_loop(
 
     logger.info("CLI agent working_dir=%s project_root=%s", working_dir, project_root)
 
-    print(f"   MCP: bridge network, host.docker.internal:{args.mcp_sse_port}")
+    if getattr(args, "no_container", False):
+        print("   MCP: local stdio")
+    else:
+        print(f"   MCP: bridge network, host.docker.internal:{args.mcp_sse_port}")
 
     cli_session: CliSession | None = None
     cli_log_file = None
@@ -786,13 +817,14 @@ def _run_agent_loop(
             dangerously_skip_permissions=True,
             log_file=cli_log_file,
             metrics=session_metrics,
-            containerized=True,
+            containerized=not getattr(args, "no_container", False),
             session_number=iteration,
             resume_session_id=last_session_id,
             thinking_effort=args.agent_thinking_effort,
             mcp_sse_port=args.mcp_sse_port,
             run_id=run_id,
             agent_memory_dir=str(agent_memory_dir),
+            agent_model=args.agent_model,
         )
 
         wait_start = time.monotonic()
@@ -801,10 +833,16 @@ def _run_agent_loop(
 
         while cli_session.process.poll() is None:
             if services.server and services.server.poll() is not None:
-                logger.error("Server died, aborting")
+                server_code = services.server.poll()
+                if server_code == 0:
+                    logger.info("Server exited cleanly, stopping agent")
+                    reason = "server_exited"
+                else:
+                    logger.error("Server died with exit code %s, aborting", server_code)
+                    reason = "server_died"
                 _terminate_process(cli_session.process, 10, "Stopping agent", use_process_group=True)
                 _cleanup_cli_session(cli_session, cli_log_file)
-                return ("server_died", cli_session, None)
+                return (reason, cli_session, None)
             now = time.monotonic()
 
             if now - last_checkpoint_time >= 60.0:
@@ -924,18 +962,46 @@ def main():
     parser.add_argument("--graceful-timeout", type=int, default=30,
                        help="Graceful shutdown timeout in seconds before force kill (default: 30)")
     parser.add_argument("--record", action="store_true", help="Record video of the gameplay")
+    parser.add_argument("--collect-dataset", action="store_true",
+                       help="Record PNG frames plus per-frame action/state JSONL for dataset collection")
+    parser.add_argument("--dataset-output-dir", type=str, default=None,
+                       help="Dataset output root or episode directory")
+    parser.add_argument("--dataset-state-interval", type=int, default=1,
+                       help="Write one state row every N frames")
+    parser.add_argument("--dataset-max-seconds", type=float, default=None,
+                       help="Stop dataset collection after this many seconds")
+    parser.add_argument("--dataset-frame-writer-workers", type=int, default=4,
+                       help="Number of background workers for PNG frame writes (default: 4; lower is safer for many parallel runs)")
+    parser.add_argument("--dataset-png-compress-level", type=int, default=6,
+                       help="PNG compression level 0-9 for dataset frames (default: 6 for storage)")
+    parser.add_argument("--dataset-compact-state-mode", type=str, default="fast", choices=["fast", "comprehensive"],
+                       help="State row source: fast direct memory reads or old comprehensive state reader")
+    parser.add_argument("--terminate-on-first-badge", action="store_true",
+                       help="Stop the server and finalize the dataset when the first badge is detected")
     parser.add_argument("--no-ocr", action="store_true", default=True, help="Disable OCR dialogue detection")
     parser.add_argument("--direct-objectives", type=str, help="Load a specific direct objective sequence")
     parser.add_argument("--direct-objectives-start", type=int, default=0, help="Start index for direct objectives")
+    parser.add_argument("--direct-objectives-battling-start", type=int, default=0,
+                       help="Start index for battling objectives (only used in categorized mode)")
     parser.add_argument("--run-name", type=str, default=None, help="Optional name for the run directory")
     parser.add_argument("--build", action="store_true",
                        help="Build the container image before running")
     parser.add_argument("--mcp-sse-port", type=int, default=None,
                        help="Port for MCP SSE server (default: game_port + 2)")
+    parser.add_argument("--no-container", action="store_true",
+                       help="Run the CLI agent on the host with stdio MCP instead of Docker/SSE")
     parser.add_argument("--agent-thinking-effort", type=str, choices=["low", "medium", "high"],
                        help="Thinking effort level for CLI agent (low/medium/high)")
+    parser.add_argument("--agent-model", type=str, default=None,
+                       help="Model for the external CLI agent. Codex defaults to gpt-5.4-mini.")
 
     args = parser.parse_args()
+    if args.backend == "codex" and not args.agent_model:
+        args.agent_model = "gpt-5.4-mini"
+
+    os.environ["GAME_TYPE"] = args.game
+    if args.run_name:
+        os.environ["RUN_NAME"] = args.run_name
 
     print("=" * 60)
     game_label = "Red" if args.game == "red" else "Emerald"
@@ -962,6 +1028,7 @@ def main():
             "backend": args.backend,
             "termination_condition": args.termination_condition,
             "termination_threshold": args.termination_threshold,
+            "agent_model": args.agent_model,
         },
     )
 
@@ -990,7 +1057,9 @@ def main():
     print(f"\n💾 Agent memory directory: {agent_memory_dir}")
 
     if args.build:
-        if not _build_container_image(backend):
+        if args.no_container:
+            print("ℹ️  --build ignored in --no-container mode")
+        elif not _build_container_image(backend):
             return 1
 
     backend.seed_agent_auth(agent_memory_dir)
@@ -1026,13 +1095,16 @@ def main():
         print("\n\n🛑 Shutdown requested by user")
         return 0
     finally:
-        try: # Always backup on termination
-            from utils.data_persistence.backup_manager import create_cli_agent_termination_backup
-            backup_path = create_cli_agent_termination_backup(run_id, termination_reason)
-            if backup_path:
-                print(f"📦 Termination backup: {backup_path}")
-        except Exception as e:
-            logger.warning("Failed to create termination backup: %s", e)
+        if termination_reason == "server_exited":
+            print("📦 Skipping termination backup for clean server exit")
+        else:
+            try: # Preserve backups for interrupts, agent failures, and unexpected exits.
+                from utils.data_persistence.backup_manager import create_cli_agent_termination_backup
+                backup_path = create_cli_agent_termination_backup(run_id, termination_reason)
+                if backup_path:
+                    print(f"📦 Termination backup: {backup_path}")
+            except Exception as e:
+                logger.warning("Failed to create termination backup: %s", e)
         _cleanup_services(
             services,
             cli_session,

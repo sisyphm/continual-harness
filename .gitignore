@@ -41,6 +41,11 @@ server/agent_thinking.txt
 out.txt
 test_outputs/
 paper_data/
+data/
+*.pid
+collection_debug/
+pids16/
+pids64/
 
 # -----------------------------------------------------------------------------
 # Python
@@ -110,6 +115,7 @@ dmypy.json
 .pyre/
 .pytype/
 cython_debug/
+diagnostics/
 
 # -----------------------------------------------------------------------------
 # IDE / editors / CLI

@@ -88,6 +88,18 @@ TOOL_REGISTRY: List[Dict[str, Any]] = [
                         "Dialogue continues or battle starts.'"
                     ),
                 },
+                "speed": {
+                    "type_": "STRING",
+                    "description": "Optional action timing preset: fast, normal, or slow. Defaults to normal.",
+                },
+                "hold_frames": {
+                    "type_": "INTEGER",
+                    "description": "Optional explicit button hold duration in emulator frames.",
+                },
+                "release_frames": {
+                    "type_": "INTEGER",
+                    "description": "Optional explicit no-button release/wait duration in emulator frames.",
+                },
             },
             "required": ["buttons", "reasoning"],
         },

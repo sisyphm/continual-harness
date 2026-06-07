@@ -414,6 +414,7 @@ class ClaudeCodeBackend(CliAgentBackend):
         mcp_sse_port: int | None = None,
         run_id: str | None = None,
         agent_memory_dir: str | None = None,
+        agent_model: str | None = None,
     ) -> tuple[list[str], dict[str, str], str, str | None]:
         env = os.environ.copy()
         env["POKEMON_MCP_SERVER_URL"] = server_url
@@ -907,6 +908,7 @@ class GeminiCliBackend(CliAgentBackend):
         mcp_sse_port: int | None = None,
         run_id: str | None = None,
         agent_memory_dir: str | None = None,
+        agent_model: str | None = None,
     ) -> tuple[list[str], dict[str, str], str, str | None]:
         env = os.environ.copy()
         env["POKEMON_MCP_SERVER_URL"] = server_url
@@ -1349,6 +1351,7 @@ env_key = "OPENROUTER_API_KEY"
         mcp_sse_port: int | None = None,
         run_id: str | None = None,
         agent_memory_dir: str | None = None,
+        agent_model: str | None = None,
     ) -> tuple[list[str], dict[str, str], str, str | None]:
         env = os.environ.copy()
         env["POKEMON_MCP_SERVER_URL"] = server_url
@@ -1407,14 +1410,15 @@ env_key = "OPENROUTER_API_KEY"
             # --skip-git-repo-check: required when workspace is not a git repo (e.g. agent_scratch_space)
             # See https://github.com/openai/codex/issues/7522
             skip_git = "--skip-git-repo-check"
+            model_arg = f" -m {shlex.quote(agent_model)}" if agent_model else ""
             cfg = f" -c model_reasoning_effort={thinking_effort}" if thinking_effort in ("low", "medium", "high") else ""
             if resume_session_id:
                 if resume_session_id == "--last":
-                    inner = f"codex exec resume --last --json {skip_git}{cfg}"
+                    inner = f"codex exec resume --last --json {skip_git}{model_arg}{cfg}"
                 else:
-                    inner = f"codex exec resume {shlex.quote(resume_session_id)} --json {skip_git}{cfg}"
+                    inner = f"codex exec resume {shlex.quote(resume_session_id)} --json {skip_git}{model_arg}{cfg}"
             else:
-                inner = f"cat {self.WORKSPACE_PATH}/{self.DIRECTIVE_FILENAME} | codex exec --json -C {self.WORKSPACE_PATH} --dangerously-bypass-approvals-and-sandbox {skip_git}{cfg} -"
+                inner = f"cat {self.WORKSPACE_PATH}/{self.DIRECTIVE_FILENAME} | codex exec --json -C {self.WORKSPACE_PATH} --dangerously-bypass-approvals-and-sandbox {skip_git}{model_arg}{cfg} -"
 
             shell_cmd = "'" + inner.replace("'", "'\"'\"'") + "'"
             docker_cmd.extend(["sh", "-c", shell_cmd])
@@ -1435,13 +1439,26 @@ env_key = "OPENROUTER_API_KEY"
                 env["CODEX_HOME"] = str(agent_memory_path)
 
             codex_cfg = ["-c", f"model_reasoning_effort={thinking_effort}"] if thinking_effort in ("low", "medium", "high") else []
+            model_arg = f" -m {shlex.quote(agent_model)}" if agent_model else ""
             cfg_str = f" {' '.join(codex_cfg)}" if codex_cfg else ""
             if resume_session_id:
+                continue_prompt = (
+                    "Continue autonomously from the current Pokemon game state. "
+                    "Use MCP tools directly as needed, and keep acting until the orchestrator terminates the run."
+                )
                 if resume_session_id == "--last":
-                    return (["codex", "exec", "resume", "--last", "--json", "--skip-git-repo-check"] + codex_cfg, env, bootstrap, None)
-                return (["codex", "exec", "resume", resume_session_id, "--json", "--skip-git-repo-check"] + codex_cfg, env, bootstrap, None)
+                    resume_target = "--last"
+                else:
+                    resume_target = shlex.quote(resume_session_id)
+                resume_cfg_str = f" {' '.join(codex_cfg)}" if codex_cfg else ""
+                resume_cmd = (
+                    f"printf '%s\\n' {shlex.quote(continue_prompt)} | "
+                    f"codex exec resume {resume_target} --json --dangerously-bypass-approvals-and-sandbox "
+                    f"--skip-git-repo-check{model_arg}{resume_cfg_str} -"
+                )
+                return (["sh", "-c", resume_cmd], env, bootstrap, None)
 
-            cat_cmd = f"cat {shlex.quote(str(directive_file))} | codex exec --json -C {shlex.quote(working_dir)} --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check{cfg_str} -"
+            cat_cmd = f"cat {shlex.quote(str(directive_file))} | codex exec --json -C {shlex.quote(str(working_dir_abs))} --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check{model_arg}{cfg_str} -"
             return (["sh", "-c", cat_cmd], env, bootstrap, None)
 
     def _handle_thread_started(
@@ -1858,8 +1875,9 @@ class HermesCliBackend(CliAgentBackend):
         mcp_sse_port: int | None = None,
         run_id: str | None = None,
         agent_memory_dir: str | None = None,
+        agent_model: str | None = None,
     ) -> tuple[list[str], dict[str, str], str, str | None]:
-        del dangerously_skip_permissions, session_number, thinking_effort
+        del dangerously_skip_permissions, session_number, thinking_effort, agent_model
         env = os.environ.copy()
         env["POKEMON_MCP_SERVER_URL"] = server_url
         env["POKEMON_SERVER_URL"] = server_url
