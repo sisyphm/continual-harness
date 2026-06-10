@@ -12,8 +12,10 @@
 1. **`semantic.jsonl` objects are garbage dataset-wide (extractor bug, now understood).**
    `world_model_sink.extract_objects` read `gObjectEvents` with stride 68 and `graphicsId` at +0x03;
    the real struct (validated against live frames) is **36 bytes (0x24)** with `graphicsId` at
-   **+0x05**, `localId` +0x08, initial/current/previous `Coords16` at +0x0C/0x10/0x14 in **plain map
-   coords (no +7)**, facing-ish nibbles at +0x18; bit0-of-byte0 is NOT usable as the active flag
+   **+0x05**, `localId` +0x08, initial/current/previous `Coords16` at +0x0C/0x10/0x14 in map coords
+   **+ MAP_OFFSET (7)** *(correction 2026-06-10: Phase 0 first read these as offset-free — the
+   Phase-1 visual-overlay validation proved the +7; boxes land pixel-exact only after subtracting
+   it)*, facing nibble at +0x18 (1=DOWN 2=UP 3=LEFT 4=RIGHT); bit0-of-byte0 is NOT usable as the active flag
    (0xFF-cleared slots read active) — validity must be tested structurally. Corrected parsing
    recovers **67 distinct NPC graphics ids** (vs 4 under the bug). ⇒ v1's NPC conditioning channel
    was noise. Fix lands in the Phase-1 extractors; `DATASET.md` needs an erratum; everything is
@@ -107,3 +109,19 @@ Numeric targets; "support" = frames at 60 fps. Re-audit after collection; iterat
 
 Phase 0 complete (all five audit items + this report). **Next: Phase 1 extractors** (corrected
 objects, text-printer search, battle/UI state), in parallel with **Phase 2 collection** per §3.
+
+### Phase-1 progress (2026-06-10)
+
+`collection/extractors/` — `ram.py` (GBAState: ONE read API over recorded blobs and the live
+emulator; streaming chain walker), `entities.py` (corrected ObjectEvent parse: gfx/localId/facing
+nibble/coords−7; player position from saveblock + facing from the object record), `terrain.py`
+(gBackupMapLayout **pinned at 0x03005DC0** by consensus scan; live metatile grid + window).
+Validated (`validate_phase1.py`): blob-seam player x/y **100% (239/239)** vs recorded semantics;
+NPC→OAM screen cross-check **90%** at fitted offset ≈(0,0) + pixel-exact visual overlays incl.
+facing labels; layout parse 0 failures on cb2-overworld frames; containment 210/210; player-tile
+walkability 98.6%. Findings: (a) the +7 coord correction above; (b) **semantic.jsonl `facing` is
+unreliable** — it was the collector's input-tracker and goes stale after warps/forced turns
+(pixel-adjudicated against the object record); (c) residual T2/T3 instability (12/14 of ~190
+samples) attributed to map-connection transition windows (map-id and layout rebase at different
+instants) — precompute masks transition frames anyway (the v1 indexer already split there).
+Remaining Phase-1 modules: text-printer search, battle menu/UI state, mode/effects packaging.
