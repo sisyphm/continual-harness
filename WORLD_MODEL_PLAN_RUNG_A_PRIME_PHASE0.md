@@ -110,6 +110,36 @@ Numeric targets; "support" = frames at 60 fps. Re-audit after collection; iterat
 Phase 0 complete (all five audit items + this report). **Next: Phase 1 extractors** (corrected
 objects, text-printer search, battle/UI state), in parallel with **Phase 2 collection** per §3.
 
+### Phase-2 + M7 acceptance (2026-06-11) — DATA READY
+
+Corpus after two behavior waves: **1,404,704 frames / 119 runs**, all with A′ conditions
+(`data/processed/conditions/`, 119 npz) + the all-modes clip index (3,011 clips / 1.40M frames).
+
+**M7 acceptance (unexplained-dynamics re-measure under REAL A′ conditions,
+`extractors/unexplained_v2.py`):** 44.6% (Phase-0 proxy) → **9.9% of corpus; 3.2% on overworld**.
+Remainder is the declared tail by inspection: battle move-animations (94% of changing battle
+frames — phase bytes change only at boundaries), transition redraws, ambient tile animation.
+
+**Shopping-list verdicts:**
+| item | target | result | verdict |
+|---|---|---|---|
+| S1 idle | ≥40k varied | **273k** behavior idle64 (spots × facings × durations) | ✅ 6.8× |
+| S2 run gait | exists? + volume | shoes active at ALL checkpoints; ~17k running frames + walk/run mixes | ✅ (more is cheap) |
+| S3 bumps | ≥5k events | 3.7k conservative-metric events (each 24+ frames of bump texture) | 🟡 adequate |
+| S4 turns | ≥30k | 14.6k events (tap-turn texture across maps) | 🟡 adequate |
+| S6 enemy species | every pre-badge ≥3k frames | **17 species**, min support 736 | 🟡 tail thin but present |
+| S7 outcomes | faints/level-ups/catches | fights + faints + level-ups ✓; **catches impossible** (no Poké Balls in the chain save) | 🟡 see residual |
+| S8 menus | ≥10k/screen | 8 menu runs (~40k frames) of seeded UI walks | ✅ mass-wise |
+| S9 dialogue styles | varied advance | 8 runs × 4 styles, every facing probed | ✅ |
+| S5/S10 residuals | starters / one-offs | **documented scope decisions** (below) | 📋 |
+
+**Residual scope decisions (explicit, revisitable):** (a) player-side battle species stays
+{Mudkip, tutorial Zigzagoon} — catching requires a mart/ball pipeline the chain save never needed;
+the live demo drives from real saves where the player side IS Mudkip, so first-model fidelity is
+unaffected; back-sprite generalization to other species is deferred (ball-buying behavior or a
+save-edit bank). (b) Unchosen starters (Treecko/Torchic) absent — needs chain variants. (c) One-off
+scenes remain single-visit (intro-replay job not yet scheduled).
+
 ### Phase-1 progress (2026-06-10)
 
 `collection/extractors/` — `ram.py` (GBAState: ONE read API over recorded blobs and the live
