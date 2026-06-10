@@ -6,14 +6,14 @@ this build at **0x03005DC0** by cross-frame consensus scan (present on 38/38 sam
 frames with map-consistent dims; the other scan candidates were constant-dim stack noise).
 `locate_layout` remains as the discovery/confirmation tool; `terrain()` reads the pinned struct.
 
-Buffer semantics (validated in Phase 0 / the legacy tile-behavior reader):
-    width  = map_width + 15,  height = map_height + 15      (the border margin)
+Buffer semantics (validated in Phase 0 + ROM cross-validation of all recorded maps):
+    width  = map_width + 15,  height = map_height + 14      (margin; height is NOT symmetric —
+        41/43 recorded maps match their ROM layout dims exactly under (w−15, h−14))
     index(x, y) = (x + 7) + (y + 7) * width                 (x, y in PLAYER map coords)
     word: bits 0-9 metatile id · 10-11 collision · 12-15 elevation
 
 Metatile ids are tileset-local identities (0-511 primary, 512+ secondary) — the embedding keys of
-the A′ terrain condition. The map→tileset table (so embeddings share across maps) is the ROM-side
-follow-up; ids + map-id are already sufficient to build and validate the spatial stream.
+the A′ terrain condition; the map→tileset table comes from the ROM map-groups walk (`tilesets.py`).
 """
 
 from __future__ import annotations
@@ -39,8 +39,9 @@ class Terrain:
     map_group: int
     map_num: int
     width: int                               # buffer width  = map width  + 15
-    height: int                              # buffer height = map height + 15
-    grid: np.ndarray                         # (height, width) u16 raw words
+    height: int                              # buffer height = map height + 14 (ROM-cross-validated:
+    grid: np.ndarray                         #   41/43 recorded maps match ROM layouts exactly under
+                                             #   (w-15, h-14); the old -15 height was off by one)
 
     @property
     def map_width(self) -> int:
@@ -48,7 +49,7 @@ class Terrain:
 
     @property
     def map_height(self) -> int:
-        return self.height - 15
+        return self.height - 14
 
     def metatile_ids(self) -> np.ndarray:
         return self.grid & 0x3FF

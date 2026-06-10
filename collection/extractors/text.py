@@ -95,5 +95,13 @@ def text_state(st: GBAState, rom: bytes | None = None) -> TextState | None:
         body = _read_span(st, start, MAX_TEXT, rom)
         if body is None:
             continue
-        return TextState(text=decode(body), reveal=cur - start, source=start)
+        txt = decode(body)
+        # normalize away buffer fill: 0x00 doubles as 'space', so zero-fill (plus the occasional
+        # junk byte) decodes as leading whitespace — no real message opens with it
+        lead = len(txt) - len(txt.lstrip(" "))
+        if lead:
+            txt, start = txt[lead:], start + lead
+        if not txt.strip():
+            continue                                      # printer alive but no content (UI clears)
+        return TextState(text=txt, reveal=max(min(cur - start, len(txt)), 0), source=start)
     return None

@@ -33,7 +33,7 @@ IDLE_BUCKETS = ((1, 7), (8, 15), (16, 31), (32, 63), (64, 127), (128, 255), (256
 
 
 def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:
-    """All audit-able runs: (name, dir, kind) — storyline attempts + coverage seeds."""
+    """All audit-able runs: (name, dir, kind) — storyline attempts + coverage seeds + behavior runs."""
     runs = []
     for seg in sorted((data_root / "storyline_wm").iterdir()):
         for att in sorted(seg.glob("attempt_*")):
@@ -42,6 +42,11 @@ def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:
     for seed in sorted((data_root / "coverage_dataset").iterdir()):
         if seed.is_dir() and (seed / "semantic.jsonl").exists():
             runs.append((seed.name, seed, "coverage"))
+    beh = data_root / "behaviors"
+    if beh.exists():
+        for d in sorted(beh.iterdir()):
+            if (d / "semantic.jsonl").exists():
+                runs.append((d.name, d, "behavior"))
     return runs
 
 
@@ -175,7 +180,8 @@ def main():
 
     runs = discover_runs(root)
     print(f"auditing {len(runs)} runs…")
-    per_run, agg = {}, {"storyline": Counter(), "coverage": Counter()}
+    from collections import defaultdict
+    per_run, agg = {}, defaultdict(Counter)
     for name, d, kind in runs:
         r = audit_run(d)
         per_run[f"{kind}/{name}"] = r

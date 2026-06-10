@@ -36,13 +36,22 @@ SAVEBLOCK1_PTR = 0x03005D8C            # iwram pointer -> SaveBlock1 (DMA-shifte
 PLAYER_LOCALID = 0xFF
 MAP_OFFSET = 7                         # object coords carry the border offset; player saveblock doesn't
 
+# Sub-tile screen positions (discovered by differential scan, verified on data):
+#   gSprites @0x02020630 (0x44/sprite): pos1 = s16 (x @+0x20, y @+0x22) in WORLD pixels
+#   camera offset: X @0x03005DEC, Y @0x03005DE8 (s16, next to gBackupMapLayout)
+#   screen anchor = pos1 + cam — for the player this is EXACTLY (120, 112) on every frame
+#   (OAM top-left of a 16x32 char sprite = anchor + (-8, -56), constant per sprite shape).
+# This carries mid-step sub-tile motion — the largest chunk of the Phase-0 "unexplained" tail.
+GSPRITES, SPRITE_SIZE = 0x02020630, 0x44
+CAM_X, CAM_Y = 0x03005DEC, 0x03005DE8
+
 # GBA overworld direction constants (facing nibble); 0 = none/unset
 DIRECTIONS = {1: "DOWN", 2: "UP", 3: "LEFT", 4: "RIGHT"}
 
 
 @dataclass(frozen=True)
 class Entity:
-    """One on-map object (NPC or player record), in plain map tile coords."""
+    """One on-map object (NPC or player record): identity + tile coords + sub-tile screen anchor."""
     slot: int
     graphics_id: int
     local_id: int
@@ -54,6 +63,8 @@ class Entity:
     moving_dir: str | None             # direction currently being walked (None = standing)
     movement_type: int                 # the game's wander/look-around behavior id
     sprite_id: int
+    screen_x: int                      # screen anchor = gSprites.pos1 + camera (player ≡ (120,112));
+    screen_y: int                      # pixel-accurate, carries mid-step sub-tile motion
 
     @property
     def is_player(self) -> bool:
@@ -79,14 +90,23 @@ def _valid(st: GBAState, o: int) -> bool:
     return gfx > 0 or st.u8(o + 0x08) == PLAYER_LOCALID     # gfx 0 only meaningful on the player rec
 
 
+def camera_px(st: GBAState) -> tuple[int, int]:
+    """The global sprite/world camera offset (screen = world_pos1 + camera). Its fractional part
+    is the sub-tile scroll phase the terrain condition needs."""
+    return st.s16(CAM_X), st.s16(CAM_Y)
+
+
 def entities(st: GBAState) -> list[Entity]:
     """All valid object records (NPCs + the player's record if its coords pass validity)."""
+    cam_x, cam_y = camera_px(st)
     out = []
     for slot in range(OBJ_N):
         o = OBJ_BASE + slot * OBJ_SIZE
         if not _valid(st, o):
             continue
         nib = st.u8(o + 0x18)
+        spr = st.u8(o + 0x04)
+        sb = GSPRITES + spr * SPRITE_SIZE
         out.append(Entity(
             slot=slot,
             graphics_id=st.u8(o + 0x05),
@@ -96,7 +116,9 @@ def entities(st: GBAState) -> list[Entity]:
             facing=DIRECTIONS.get(nib & 0xF),
             moving_dir=DIRECTIONS.get(nib >> 4),
             movement_type=st.u8(o + 0x06),
-            sprite_id=st.u8(o + 0x04),
+            sprite_id=spr,
+            screen_x=st.s16(sb + 0x20) + cam_x,
+            screen_y=st.s16(sb + 0x22) + cam_y,
         ))
     return out
 
