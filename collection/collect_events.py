@@ -11,8 +11,9 @@ from pathlib import Path
 from collection.actions import normalize_action, run_action_frames, timing_for, update_facing
 from collection.catalog import EVENT_POSTCONDITION_ALIAS, discover_heatz_events
 from collection.direct_runner import DirectEmulatorRunner
-from collection.heatz_adapter import HeatzPolicy, _starter_ui_active, _visual_clock_ui, _visual_dialog_open, build_heatz_state, grind_action
+from collection.heatz_adapter import HeatzPolicy, _starter_ui_active, _visual_clock_ui, _visual_dialog_open, build_heatz_state, grind_action, heal_action, may_heal_action
 from collection.recorder import ChunkRecorder
+from collection.world_model_sink import WorldModelSink
 from collection.state import control_mode as classify_control_mode, location_name
 
 
@@ -27,7 +28,13 @@ def _load_expected_state(*, rom_path: str, completed_state: str | None, event_id
     probe = DirectEmulatorRunner(rom_path=rom_path, load_state=completed_state, story_bucket=event_id)
     try:
         probe.initialize()
-        return probe.state()
+        state = probe.state()
+        # Some checkpoints are corrupt and load as the title screen. A bogus position
+        # target would wedge the postcondition on _responsive_target_reached and never
+        # fall through to the milestone check, so treat it as "no expected state".
+        if str(state.map or "").upper().replace(" ", "_") in {"TITLE_SEQUENCE", "UNKNOWN", ""}:
+            return None
+        return state
     finally:
         probe.close()
 
@@ -139,6 +146,101 @@ def _party_has_species_level(state, species: str, min_level: int) -> bool:
     return False
 
 
+# Towns with a Pokémon Center where we top the party up when it's run low — the
+# same resource management a human does between routes (no heal is baked into the
+# milestone chain until after the gauntlets that need it).
+# Towns where we run an auto-heal detour. Only OLDALE qualifies: it's the lone Centre
+# town before the Route 102 trainer gauntlet that has no scripted heal event, so a
+# run-down Mudkip would otherwise black out there. Petalburg/Rustboro each have their
+# own HEAL_AT_*_CENTER event, so auto-healing in them is redundant and only risks
+# detouring the "reach the city" events away from their goal.
+_HEAL_TOWNS = {"OLDALE TOWN"}
+_HEAL_HP_FRACTION = 0.6
+
+
+def _party_below_fraction(current, frac: float) -> bool:
+    return any(
+        (m.get("max_hp") or 0) > 0 and (m.get("hp") or 0) < frac * (m.get("max_hp") or 0)
+        for m in (current.party_summary or [])
+    )
+
+
+def _party_all_full(current) -> bool:
+    party = current.party_summary or []
+    return all((m.get("hp") or 0) >= (m.get("max_hp") or 0) > 0 for m in party) if party else True
+
+
+# Events that own their own Pokémon-Center flow (entering, healing, exiting). The
+# generic heal detour must stay out of their way, or it fights their navigation.
+_HEAL_OWNING_EVENT = ("CENTER", "HEAL")
+
+
+def _should_heal(current, heal_state: dict, event_id: str | None = None) -> bool:
+    """Run a heal detour when the party is run-down in a Centre town, and keep it
+    running (via heal_state) until we're healed and back outside the Centre.
+
+    Skipped for events that manage their own Centre visit (their policy handles the
+    nurse), so we only auto-heal during plain transit through a Centre town."""
+    if event_id and any(tag in event_id.upper() for tag in _HEAL_OWNING_EVENT):
+        return False
+    if heal_state.get("skip"):  # heal_action vetoed the detour for this event
+        return False
+    map_name = str(current.map or "")
+    in_center = "POKEMON CENTER" in map_name.upper()
+    if heal_state.get("active"):
+        if not in_center and _party_all_full(current):
+            # Hand back to the policy only once we're settled on solid town ground.
+            # The exit warp reports map-name and position on different frames, so a
+            # single "in town" reading can be a transient mid-warp flicker; requiring
+            # the same town tile twice in a row avoids deactivating while still on the
+            # Centre door (where the policy would just walk back in).
+            settle_key = (map_name, current.x, current.y)
+            if map_name in _HEAL_TOWNS and settle_key == heal_state.get("settle_key"):
+                heal_state["active"] = False
+                heal_state.pop("settle_key", None)
+                return False
+            heal_state["settle_key"] = settle_key
+            return True
+        heal_state.pop("settle_key", None)
+        return True
+    if _heal_needed_here(current, event_id):
+        heal_state["active"] = True
+        return True
+    return False
+
+
+def _heal_needed_here(current, event_id: str | None = None) -> bool:
+    """Pure (no side effects) test of whether a heal detour should *start* here:
+    a run-down party in a Centre town, for an event that doesn't own its own Centre
+    flow. Used to gate the post-action postcondition so the gate can't fire on the
+    same step we walk into town, before the stateful _should_heal activates next
+    iteration. Kept side-effect-free so it never disturbs the heal settle tracking."""
+    if event_id and any(tag in event_id.upper() for tag in _HEAL_OWNING_EVENT):
+        return False
+    return str(current.map or "") in _HEAL_TOWNS and _party_below_fraction(current, _HEAL_HP_FRACTION)
+
+
+# Grinding to the rival's level on Route 103 racks up cumulative chip damage with no
+# Centre on the route, so Mudkip can black out mid-grind or while walking up to the
+# rival. When it drops below this fraction we detour south to Oldale's Centre to heal.
+_MAY_HEAL_FRACTION = 0.5
+
+
+def _may_heal_needed(current, may_state: dict) -> bool:
+    """Whether the MAY Route-103 grind/rival-approach should detour to Oldale to heal.
+    Stays active (via may_state) until Mudkip is back on Route 103 at full HP."""
+    on_route = str(current.map or "").upper().startswith("ROUTE 103")
+    if may_state.get("active"):
+        if on_route and _party_all_full(current):
+            may_state["active"] = False
+            return False
+        return True
+    if _party_below_fraction(current, _MAY_HEAL_FRACTION):
+        may_state["active"] = True
+        return True
+    return False
+
+
 # Story gates that require the starter to be a certain level. We grind the route's
 # grass up to this level once the rest of the gate is satisfied (e.g. rival beaten).
 _EVENT_GRIND_LEVEL = {"MAY_ROUTE103_INTERACTION": 7}
@@ -164,7 +266,7 @@ def _grind_target(event_id: str | None, current) -> int | None:
     return None
 
 
-def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunner, current) -> bool:
+def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunner, current, start_money: int = 0) -> bool:
     if event_id == "STARTER_CHOSEN":
         # Done the moment we hold Mudkip and are back in overworld control after the
         # rescue battle. The saved checkpoint sits on a script tail (Birch then walks
@@ -186,7 +288,32 @@ def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunn
             and (current.money or 0) >= 3300
             and _party_has_species_level(current, "Mudkip", 7)
         )
+    if event_id == "ROUTE_104_SOUTH":
+        # The completed checkpoint is corrupt and the milestone is pre-marked, so the
+        # gate would pass instantly back in Petalburg and never walk onto Route 104 —
+        # leaving the next event (PETALBURG_WOODS) stranded a map away. Require actually
+        # standing on Route 104 (its policy then heads for the woods entrance).
+        return (
+            "ROUTE 104" in str(current.map or "").upper()
+            and not current.in_battle
+            and not _visible_dialog_open(runner)  # memory cm falsely reads "dialogue" here
+        )
+    if event_id == "TRAINER_JOSH_BATTLE":
+        # Corrupt checkpoint + no milestone is defined for this gym trainer, so detect
+        # the win by the trainer payout: beating Josh bumps our money. Then we're back
+        # in the overworld, free to head up to Roxanne (the next event).
+        return (
+            (current.money or 0) > start_money
+            and not current.in_battle
+            and not _visible_dialog_open(runner)
+        )
     return False
+
+
+# Events whose completion is decided ONLY by _semantic_postcondition_met (their stored
+# milestone/checkpoint is unreliable, so we must not fall through to the sticky-flag
+# milestone check, which would pass prematurely).
+_SEMANTIC_ONLY_EVENTS = {"ROUTE_104_SOUTH", "TRAINER_JOSH_BATTLE"}
 
 
 def _postcondition_met(
@@ -197,17 +324,37 @@ def _postcondition_met(
     expected_state=None,
     accept_unresponsive_target: bool = False,
     event_id: str | None = None,
+    start_money: int = 0,
+    current=None,
 ) -> bool:
     if not min_actions_met:
         return False
-    current = runner.state()
+    # Reuse a state already read this iteration when given — r.state() is ~12 ms and
+    # was otherwise re-read here every call (twice per action).
+    if current is None:
+        current = runner.state()
     if event_id == "STARTER_CHOSEN" and not _party_has_species_level(current, "Mudkip", 1):
         # The starter pick is only complete when we actually hold Mudkip; a wrong
         # starter (e.g. Torchic) must fail loudly instead of passing on position alone.
         return False
-    if _semantic_postcondition_met(event_id, runner, current):
+    if _semantic_postcondition_met(event_id, runner, current, start_money):
         return True
-    if expected_state is not None and accept_unresponsive_target and _target_reached(current, expected_state):
+    if event_id in _SEMANTIC_ONLY_EVENTS:
+        return False  # decided solely by the semantic check above; no milestone fallback
+    if postcondition == "STONE_BADGE" and current.badges and current.badges >= 1:
+        # The badge IS the goal — accept the instant it's earned, even while Roxanne's
+        # long award dialog is still on screen (the generic visible-dialog / overworld
+        # gates below would otherwise reject every frame of that cutscene).
+        return True
+    if (
+        expected_state is not None
+        and accept_unresponsive_target
+        and not current.in_battle
+        and _physical_target_reached(current, expected_state)
+    ):
+        # These checkpoints sit on a script/cutscene tail where memory's control_mode
+        # is unreliable (e.g. it reads "dialogue" all over the Petalburg gym near
+        # Norman with nothing on screen). Accept the target on position alone.
         return True
     if _visible_dialog_open(runner):
         return False
@@ -246,6 +393,14 @@ _EVENTS_REQUIRING_MAP_STATE = {
 _EVENTS_ACCEPTING_UNRESPONSIVE_TARGET = {
     "LITTLEROOT_TO_ROUTE101",
     "ROUTE_101",
+    # DAD_DIALOG_CONFIRMED's completed checkpoint sits on Norman's post-cutscene
+    # greeting: memory reads free_overworld at (4,108) but a dialog box is still on
+    # screen, so the visual-dialog veto would reject even the expert's own target.
+    # Accept the position-based target here instead.
+    "DAD_DIALOG_CONFIRMED",
+    # BACK_IN_GYM_AFTER_CUTSCENE ends at the same Norman tile (4,108); memory's
+    # dialogue/control_mode reads are unreliable there too.
+    "BACK_IN_GYM_AFTER_CUTSCENE",
 }
 
 
@@ -290,7 +445,12 @@ def _tail_progress_key(state, visible_dialog: bool) -> tuple:
 
 
 def _can_plan_from_state(state, *, visible_dialog: bool) -> bool:
-    return state.control_mode == "free_overworld" and not visible_dialog
+    # Trust the visual dialog check over the memory control_mode: this ROM sometimes
+    # reports control_mode="dialogue" with no dialog box on screen (e.g. standing in
+    # the Petalburg gym near Norman), which would otherwise wedge navigation. The
+    # BFS fallback simulates real movement, so it harmlessly no-ops if we truly can't
+    # move; what matters is not planning *through* an actual on-screen dialog/battle.
+    return not visible_dialog and not state.in_battle
 
 
 def _read_nav_snapshot(runner: DirectEmulatorRunner) -> dict:
@@ -434,6 +594,7 @@ def collect_one_event(
     min_actions: int,
     stall_actions: int,
     blocked_nav_actions: int,
+    record_condition: bool = False,
 ) -> dict:
     event_output = Path(output_dir) / event_id / "attempt_000001"
     event_output.mkdir(parents=True, exist_ok=True)
@@ -442,14 +603,23 @@ def collect_one_event(
     with ChunkRecorder(
         event_output,
         run_id=f"event_{event_id}",
-        visual_fps=visual_fps,
+        # World-model mode records every frame's RGB so it aligns 1:1 with the per-frame
+        # PPU condition stream (the frame_hook fires on every step_frame).
+        visual_fps=1000 if record_condition else visual_fps,
         backend=backend,
         metadata={"event_id": event_id, "pre_state": pre_state, "completed_state": completed_state, "postcondition": postcondition},
     ) as recorder:
         expected_state = _load_expected_state(rom_path=rom_path, completed_state=completed_state, event_id=event_id)
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=pre_state, story_bucket=event_id, recorder=recorder)
         runner.initialize()
+        # World-model condition capture: fires only on real (step_frame) playthrough frames,
+        # not on the restore-based planning sims (_simulate_action bypasses step_frame).
+        sink = WorldModelSink(event_output) if record_condition else None
+        if sink is not None:
+            runner.frame_hook = sink.capture
+            sink.capture(runner)  # align with the initial recorded frame
         start_state = runner.state()
+        start_money = start_state.money or 0
         initial_state_file = _persist_state_bytes(event_output, "initial.state", runner.save_state_bytes())
         initial_frame_file = _persist_frame(event_output, "initial_frame", runner)
         start_frame = runner.frame_idx
@@ -460,6 +630,8 @@ def collect_one_event(
         prev_action: str | None = None
         stuck_count = 0
         grind_state: dict = {}
+        heal_state: dict = {}
+        may_heal_state: dict = {}
         last_progress_key = _state_key(start_state)
         target_tail_actions = 0
         target_tail_stall_count = 0
@@ -472,7 +644,7 @@ def collect_one_event(
             accept_unresponsive_target = event_id in _EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
             if (
                 _responsive_target_reached(runner, expected_state)
-                or _semantic_postcondition_met(event_id, runner, runner.state())
+                or _semantic_postcondition_met(event_id, runner, runner.state(), start_money)
                 or (accept_unresponsive_target and expected_state is not None and _target_reached(runner.state(), expected_state))
             ):
                 validation = "skipped"
@@ -501,19 +673,34 @@ def collect_one_event(
                 )
 
             for _ in range(max_actions):
-                if _postcondition_met(
+                policy_source = "heatz"
+                current_before_action = runner.state()
+                # The gate takes priority over *starting* a heal detour: if we've already
+                # reached the event's goal (e.g. we entered Petalburg right beside it),
+                # finish instead of wandering off to the Centre. An in-progress heal
+                # (heal_state active) is never interrupted by this.
+                if not heal_state.get("active") and _postcondition_met(
                     runner,
                     postcondition,
                     min_actions_met=actions_taken >= min_actions,
                     expected_state=expected_state,
                     accept_unresponsive_target=accept_unresponsive_target,
                     event_id=event_id,
+                    start_money=start_money,
+                    current=current_before_action,
                 ):
                     validation = "passed"
                     break
+                healing = not current_before_action.in_battle and _should_heal(current_before_action, heal_state, event_id)
+                # MAY's grind has no Centre on Route 103; detour to Oldale to heal when
+                # run-down. It only steers the overworld (descend → heal → ascend); the
+                # policy fights any wild battle along the way (its battle-cursor state
+                # persists, which a direct handle_battle call here would lack). It owns
+                # healing on/around Route 103, so it pre-empts the generic heal.
+                may_healing = event_id == "MAY_ROUTE103_INTERACTION" and _may_heal_needed(current_before_action, may_heal_state)
+                if may_healing:
+                    healing = False
 
-                policy_source = "heatz"
-                current_before_action = runner.state()
                 visible_dialog = _visible_dialog_open(runner)
                 h_state = build_heatz_state(
                     runner.env,
@@ -528,7 +715,32 @@ def collect_one_event(
                 # rival is beaten and we're back in control but under-levelled), grind
                 # in the route's grass instead of stalling — the policy itself fights
                 # the wild battles this triggers.
-                if not current_before_action.in_battle and _grind_target(event_id, current_before_action) is not None:
+                if healing:
+                    # Tell the heal detour where the event wants to end up, so it can
+                    # both decide whether the detour is worth taking and, after healing,
+                    # walk back to the goal instead of stranding us by the Centre.
+                    if expected_state is not None and expected_state.x is not None and expected_state.y is not None:
+                        h_state["_heal_goal"] = (expected_state.map, expected_state.x, expected_state.y)
+                    heal_raw = heal_action(h_state)
+                    if heal_raw == "heal_skip":
+                        # Centre is too far from this event's goal; skip the detour for
+                        # the rest of the event and let the party heal somewhere closer.
+                        heal_state["active"] = False
+                        heal_state["skip"] = True
+                        heal_state.pop("settle_key", None)
+                        healing = False
+                    else:
+                        action = normalize_action(heal_raw)
+                        policy_source = "heatz_heal"
+                        stuck_count = 0
+
+                if may_healing and not current_before_action.in_battle:
+                    action = normalize_action(may_heal_action(h_state))
+                    policy_source = "heatz_may_heal"
+                    stuck_count = 0
+                elif healing:
+                    pass
+                elif not current_before_action.in_battle and _grind_target(event_id, current_before_action) is not None:
                     action = normalize_action(grind_action(h_state, grind_state))
                     policy_source = "heatz_grind"
                     stuck_count = 0
@@ -536,6 +748,24 @@ def collect_one_event(
                     action = normalize_action(policy.act(h_state))
 
                     at_physical_target = expected_state is not None and _physical_target_reached(current_before_action, expected_state)
+                    # The tail-settle (mash A/B/WAIT) settles the script AT its exact
+                    # destination tile — it has no movement, so it can't take the last step
+                    # onto the target. Gate it on being exactly on the tile: when we're a
+                    # tile short (e.g. DAD_DIALOG, where stepping up onto (4,108) triggers
+                    # Norman) let the policy walk that step first; once we're on the tile the
+                    # tail-settle mashes through any greeting cutscene (e.g. mom in
+                    # PLAYER_HOUSE_ENTERED). Within-1-but-not-exact mashing would freeze us a
+                    # tile away and its stray B would also cancel cutscene prompts.
+                    at_exact_target = (
+                        expected_state is not None
+                        and current_before_action.map == expected_state.map
+                        and current_before_action.x == expected_state.x
+                        and current_before_action.y == expected_state.y
+                    )
+                    # Only override a policy that has nothing useful to do (returns WAIT).
+                    # A policy actively walking the last tile to a trigger (DAD_DIALOG) or
+                    # confirming a dialog must be trusted, not clobbered by the tail-settle.
+                    policy_idle = action == "WAIT"
                     can_plan = _can_plan_from_state(current_before_action, visible_dialog=visible_dialog)
                     # Some screens (clock-setting, Birch's starter bag) read as overworld in
                     # memory but need real UI navigation that the policy handles itself. While
@@ -544,12 +774,17 @@ def collect_one_event(
                     special_ui_active = _visual_clock_ui(runner.env) or (
                         event_id == "STARTER_CHOSEN" and _starter_ui_active(runner.env)
                     )
-                    if not special_ui_active and at_physical_target and (visible_dialog or current_before_action.control_mode != "free_overworld"):
+                    if not special_ui_active and policy_idle and at_physical_target and visible_dialog:
+                        # A real on-screen dialog box is up at (or a tile from) the target
+                        # and the policy is idle — mash A/B to advance it (e.g. mom's
+                        # greeting in PLAYER_HOUSE_ENTERED). Keyed on the *visual* box, not
+                        # the memory control_mode (which false-reports "dialogue" near
+                        # Norman with nothing on screen — there we want to navigate, below).
                         action = _target_tail_action(target_tail_actions)
                         target_tail_actions += 1
                         policy_source = "heatz_script_tail_settle"
                         stuck_count = 0
-                    elif not special_ui_active and at_physical_target and current_before_action.control_mode == "free_overworld" and not _movement_responsive(runner):
+                    elif not special_ui_active and policy_idle and at_exact_target and not visible_dialog and not _movement_responsive(runner):
                         action = _target_tail_action(target_tail_actions)
                         target_tail_actions += 1
                         policy_source = "heatz_script_tail_settle"
@@ -563,10 +798,11 @@ def collect_one_event(
 
                 policy_sources_used.add(policy_source)
                 state_before_perform = current_before_action
-                runner.perform_action(action, metadata={"event_id": event_id, "policy_source": policy_source})
+                # perform_action returns the post-action AbstractState (== runner.state());
+                # reuse it instead of re-reading (~12 ms).
+                current_state = runner.perform_action(action, metadata={"event_id": event_id, "policy_source": policy_source})
                 prev_action = action
                 actions_taken += 1
-                current_state = runner.state()
                 progress_key = _state_key(current_state)
                 if progress_key == last_progress_key and action in _NAV_ACTIONS:
                     stuck_count += 1
@@ -591,7 +827,7 @@ def collect_one_event(
                     failure_reason = "stalled_no_structural_progress"
                     break
 
-                if action in _NAV_ACTIONS and state_before_perform.map == current_state.map and state_before_perform.x == current_state.x and state_before_perform.y == current_state.y:
+                if action in _NAV_ACTIONS and not current_state.in_battle and not state_before_perform.in_battle and state_before_perform.map == current_state.map and state_before_perform.x == current_state.x and state_before_perform.y == current_state.y:
                     blocked_nav_key = (current_state.map, current_state.x, current_state.y, action)
                     if blocked_nav_key == last_blocked_nav_key:
                         blocked_nav_count += 1
@@ -619,13 +855,21 @@ def collect_one_event(
                     target_tail_stall_count = 0
                     last_target_tail_key = None
 
-                if _postcondition_met(
+                # The gate takes priority over starting a heal detour: if the event's
+                # goal is already reached on arrival in a Centre town, just pass. A
+                # detour there would only strand us far from a goal we've already met
+                # (e.g. BACK_TO_OLDALE finishes at the north entry, opposite the
+                # Centre). The heal still fires via the top-of-loop check for events
+                # whose goal needs more navigation (their gate isn't met on arrival).
+                if not heal_state.get("active") and _postcondition_met(
                     runner,
                     postcondition,
                     min_actions_met=actions_taken >= min_actions,
                     expected_state=expected_state,
                     accept_unresponsive_target=accept_unresponsive_target,
                     event_id=event_id,
+                    start_money=start_money,
+                    current=current_state,
                 ):
                     validation = "passed"
                     break
@@ -655,6 +899,8 @@ def collect_one_event(
                 final_frame_file=final_frame_file,
             )
         finally:
+            if sink is not None:
+                sink.close()
             runner.close()
 
 
@@ -698,6 +944,7 @@ def main() -> None:
     parser.add_argument("--stall-actions", type=int, default=120, help="Fail early after this many actions without structural state progress; 0 disables")
     parser.add_argument("--blocked-nav-actions", type=int, default=8, help="Fail after repeating the same blocked movement this many times; 0 disables")
     parser.add_argument("--chain", action="store_true", help="Sequentially feed each event's collected final.state into dependent next events")
+    parser.add_argument("--world-model", action="store_true", help="Record per-frame full-PPU condition + semantic (world-model dataset)")
     args = parser.parse_args()
 
     audit_rows = _load_audit_recommendations(args.audit_file)
@@ -724,6 +971,7 @@ def main() -> None:
         min_actions=args.min_actions,
         stall_actions=args.stall_actions,
         blocked_nav_actions=args.blocked_nav_actions,
+        record_condition=args.world_model,
     )
     if args.workers > 1 and len(events) > 1:
         with ProcessPoolExecutor(max_workers=args.workers) as executor:

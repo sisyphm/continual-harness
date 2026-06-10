@@ -34,6 +34,7 @@ class ChunkRecorder:
         backend: str = "auto",
         max_chunk_visual_frames: int = 10_000,
         metadata: dict[str, Any] | None = None,
+        lean: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.chunks_dir = self.output_dir / "chunks"
@@ -55,10 +56,13 @@ class ChunkRecorder:
         self.backend = backend
         self.ffmpeg_path = ffmpeg_path
 
+        # lean: drop the legacy per-frame state + segment streams (unused by collect_coverage;
+        # semantic/abstract state is derivable from the stored condition). Keeps the dataset clean.
+        self.lean = bool(lean)
         self.frames_file = (self.output_dir / "frames.jsonl").open("w", encoding="utf-8", buffering=1)
         self.actions_file = (self.output_dir / "actions.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.states_file = (self.output_dir / "states.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.segments_file = (self.output_dir / "segments.jsonl").open("w", encoding="utf-8", buffering=1)
+        self.states_file = None if self.lean else (self.output_dir / "states.jsonl").open("w", encoding="utf-8", buffering=1)
+        self.segments_file = None if self.lean else (self.output_dir / "segments.jsonl").open("w", encoding="utf-8", buffering=1)
         self.manifest_path = self.output_dir / "manifest.json"
 
         self.chunk_index = 0
@@ -155,8 +159,8 @@ class ChunkRecorder:
             return True
         return False
 
-    def record_visual_frame(self, *, emulator_frame_idx: int, screenshot: Any, state_hash: str | None = None) -> None:
-        if not self.should_record_visual(emulator_frame_idx):
+    def record_visual_frame(self, *, emulator_frame_idx: int, screenshot: Any, state_hash: str | None = None, already_gated: bool = False) -> None:
+        if not already_gated and not self.should_record_visual(emulator_frame_idx):
             return
         if self._current_chunk_name is None or self.chunk_visual_frame_idx >= self.max_chunk_visual_frames:
             self._finish_chunk()
@@ -202,10 +206,12 @@ class ChunkRecorder:
         )
 
     def record_state(self, state: dict[str, Any]) -> None:
-        self._write_jsonl(self.states_file, state)
+        if self.states_file is not None:
+            self._write_jsonl(self.states_file, state)
 
     def record_segment(self, segment: dict[str, Any]) -> None:
-        self._write_jsonl(self.segments_file, segment)
+        if self.segments_file is not None:
+            self._write_jsonl(self.segments_file, segment)
 
     def close(self, *, status: str = "complete", details: dict[str, Any] | None = None) -> None:
         if self._closed:
@@ -213,7 +219,8 @@ class ChunkRecorder:
         self._finish_chunk()
         self._closed = True
         for handle in (self.frames_file, self.actions_file, self.states_file, self.segments_file):
-            handle.close()
+            if handle is not None:
+                handle.close()
         self.manifest.update(
             {
                 "status": status,

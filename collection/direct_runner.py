@@ -37,6 +37,7 @@ class DirectEmulatorRunner:
         facing: str = "DOWN",
         recorder: ChunkRecorder | None = None,
         emulator_fps: int = 80,
+        frame_hook=None,
     ):
         self.rom_path = str(rom_path)
         self.load_state = str(load_state) if load_state is not None else None
@@ -44,6 +45,9 @@ class DirectEmulatorRunner:
         self.facing = facing
         self.recorder = recorder
         self.emulator_fps = emulator_fps
+        # Called as frame_hook(self) after each *real* recorded frame (not planning sims,
+        # which bypass step_frame). Used to capture the per-frame world-model condition.
+        self.frame_hook = frame_hook
         self.env = None
         self.frame_idx = 0
         self.last_recorded_state: AbstractState | None = None
@@ -108,12 +112,17 @@ class DirectEmulatorRunner:
     def record_visual_snapshot(self, *, state_hash: str | None = None) -> None:
         if not self.recorder:
             return
+        # Decide whether this frame is kept (visual_fps subsamples ~5/6 away) BEFORE
+        # grabbing/converting the screenshot, so we don't pay for frames we'd discard.
+        if not self.recorder.should_record_visual(self.frame_idx):
+            return
         screenshot = self.screenshot()
         if screenshot is not None:
             self.recorder.record_visual_frame(
                 emulator_frame_idx=self.frame_idx,
                 screenshot=np.asarray(screenshot, dtype=np.uint8),
                 state_hash=state_hash,
+                already_gated=True,
             )
 
     def record_current_frame(
@@ -150,6 +159,8 @@ class DirectEmulatorRunner:
                 metadata=metadata or {},
             )
         self.record_current_frame(phase=phase, metadata=metadata, record_state=record_state, record_visual=True)
+        if self.frame_hook is not None:
+            self.frame_hook(self)
 
     def perform_action(
         self,
@@ -158,7 +169,8 @@ class DirectEmulatorRunner:
         speed: str = "normal",
         timing: ActionTiming | None = None,
         metadata: dict[str, Any] | None = None,
-    ) -> AbstractState:
+        record_end_state: bool = True,
+    ) -> AbstractState | None:
         timing = timing or timing_for(speed)
         self.facing = update_facing(self.facing, action)
         schedule = run_action_frames(action, timing)
@@ -176,6 +188,10 @@ class DirectEmulatorRunner:
                 },
                 record_state=False,
             )
+        # Callers that immediately re-read state (e.g. the explorer's wait_until_stable)
+        # can skip this ~12 ms read_compact_state by passing record_end_state=False.
+        if not record_end_state:
+            return None
         return self.record_state_snapshot(phase="action_end", metadata={"action": action, **(metadata or {})})
 
     def save_state_bytes(self) -> bytes | None:

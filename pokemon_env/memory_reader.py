@@ -29,6 +29,10 @@ from utils.mapping import map_stitcher_singleton
 
 logger = logging.getLogger(__name__)
 
+# Unknown map ids fall back to a stable Map_BB_NN name; warn only the FIRST time each is seen
+# (this is a per-frame hot path — warning every read floods logs and slows collection).
+_WARNED_UNKNOWN_MAPS: set = set()
+
 @dataclass
 class MemoryAddresses:
     """Centralized memory address definitions for Pokemon Emerald; many unconfirmed"""
@@ -1142,11 +1146,12 @@ class PokemonEmeraldReader:
             try:
                 location = MapLocation(map_id)
                 location_name = location.name.replace('_', ' ')
-                logger.info(f"Location resolved: map_id=0x{map_id:04X} → {location_name}")
                 return location_name
             except ValueError:
                 fallback_name = f"Map_{map_bank:02X}_{map_num:02X}"
-                logger.warning(f"Unknown map_id=0x{map_id:04X}, using fallback: {fallback_name}")
+                if map_id not in _WARNED_UNKNOWN_MAPS:        # warn once per map, not per frame
+                    _WARNED_UNKNOWN_MAPS.add(map_id)
+                    logger.warning(f"Unknown map_id=0x{map_id:04X}, using fallback: {fallback_name}")
                 return fallback_name
         except Exception as e:
             logger.warning(f"Failed to read location: {e}")

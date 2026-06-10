@@ -40,8 +40,18 @@ def _read_dialog_text(env: Any) -> str | None:
 
 def _safe_comprehensive_state(env: Any) -> dict[str, Any]:
     try:
-        screenshot = env.get_screenshot()
-        return env.get_comprehensive_state(screenshot=screenshot)
+        # Skip the ~600ms OCR dialogue pass inside get_comprehensive_state — it scans
+        # the screenshot pixel-by-pixel and dominates map-aware events, yet we never read
+        # its result (dialogs are detected with the fast pixel check _visual_dialog_open).
+        reader = getattr(env, "memory_reader", None)
+        prev = getattr(reader, "_dialog_detection_enabled", None) if reader else None
+        if reader is not None:
+            reader._dialog_detection_enabled = False
+        try:
+            return env.get_comprehensive_state(screenshot=None)
+        finally:
+            if reader is not None and prev is not None:
+                reader._dialog_detection_enabled = prev
     except Exception:
         compact = read_compact_state(env, frame_idx=0, story_bucket="UNKNOWN", facing="DOWN")
         return {
@@ -214,7 +224,10 @@ def build_heatz_state(env: Any, *, frame_idx: int, story_bucket: str, facing: st
     if include_map:
         comprehensive = _safe_comprehensive_state(env)
         state["map"].update(comprehensive.get("map") or {})
-        state["player"].update({k: v for k, v in (comprehensive.get("player") or {}).items() if k not in {"position", "location"}})
+        # Keep the fresh compact party_summary (uniform "hp" key, read every call):
+        # the comprehensive reader's party can lag a frame after a heal/battle and
+        # uses a different HP key, which breaks the full-HP check in heal_action.
+        state["player"].update({k: v for k, v in (comprehensive.get("player") or {}).items() if k not in {"position", "location", "party"}})
         state["game"].update(comprehensive.get("game") or {})
         ensure_porymap_state(state)
     return state
@@ -356,16 +369,23 @@ _STATUS_MOVE_NAMES = {
 }
 
 
-def _best_move_slot(env: Any) -> int:
-    """Slot (0-3) of the best damaging move that still has PP — most PP wins, so we
-    don't keep mashing a drained move into a "no PP left" soft-lock. Falls back to 0
-    (lets the game force Struggle when every move is out of PP)."""
+def _best_move_slot(env: Any, prefer: str | None = None) -> int:
+    """Slot (0-3) of the move to use. If ``prefer`` (a move name) is given and still has
+    PP, use it — gym leaders need a specific super-effective move (e.g. Water Gun vs
+    Roxanne's Rock types; the highest-PP heuristic alone would mash neutral Tackle and
+    never break Nosepass). Otherwise the best damaging move with the most PP (avoids a
+    no-PP soft-lock). Falls back to 0 (lets the game force Struggle when all PP is out)."""
     try:
         active = (env.memory_reader.read_party_pokemon() or [None])[0]
         moves = [str(m or "").lower().replace("-", "_") for m in (getattr(active, "moves", None) or [])]
         pps = list(getattr(active, "move_pp", None) or [])
     except Exception:
         return 0
+    if prefer:
+        want = prefer.lower().replace("-", "_")
+        for i, (mv, pp) in enumerate(zip(moves, pps)):
+            if mv == want and pp > 0:
+                return i
     best, best_pp = None, -1
     for i, (mv, pp) in enumerate(zip(moves, pps)):
         if not mv or mv == "none" or pp <= 0 or mv in _STATUS_MOVE_NAMES:
@@ -406,7 +426,7 @@ def _battle_state(env: Any) -> str:
     return "message"
 
 
-def _battle_menu_action(state: dict[str, Any], mode: str) -> str:
+def _battle_menu_action(state: dict[str, Any], mode: str, prefer: str | None = None) -> str:
     """Visual battle-menu state machine. Detects the current screen each step and
     pins the cursor to the target (FIGHT/RUN, then the chosen move). The per-screen
     step resets whenever the screen changes, so it never drifts out of phase with
@@ -426,7 +446,7 @@ def _battle_menu_action(state: dict[str, Any], mode: str) -> str:
         # main-menu 2x2: FIGHT(0,0) BAG(0,1) / POKéMON(1,0) RUN(1,1).
         seq = ("up", "left", "a") if mode == "fight" else ("down", "right", "a")
     else:  # move-select menu (fight mode): pin to the chosen move's slot, then A.
-        slot = _best_move_slot(env)
+        slot = _best_move_slot(env, prefer)
         seq = ("up" if slot < 2 else "down", "left" if slot % 2 == 0 else "right", "a")
     step = state.get("_battle_ui_step", 0)
     state["_battle_ui_step"] = step + 1
@@ -434,10 +454,11 @@ def _battle_menu_action(state: dict[str, Any], mode: str) -> str:
 
 
 def handle_battle(state: dict[str, Any], strategy: str = "fight") -> str:
-    # Flee wild battles; fight trainers (unfleeable) and gym leaders. "water_gun"
-    # collapses to fight — the move picker chooses Water Gun when it's the best move.
+    # Flee wild battles; fight trainers (unfleeable) and gym leaders. A named-move
+    # strategy (e.g. "water_gun") pins that move when it has PP — needed for Roxanne.
     mode = "run" if (strategy == "run" and not _is_trainer_battle(state.get("_env"))) else "fight"
-    return _battle_menu_action(state, mode)
+    prefer = strategy if strategy not in {"fight", "run"} else None
+    return _battle_menu_action(state, mode, prefer)
 
 
 def _as_int(value: Any) -> int | None:
@@ -534,7 +555,7 @@ def _npc_blocked_tiles(env: Any, exclude_xy: tuple[int, int] | None = None) -> l
         return []
 
 
-def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fallback: bool = False, max_distance: int = 150) -> str:
+def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fallback: bool = False, max_distance: int = 150, extra_blocked: list[tuple[int, int]] | None = None) -> str:
     if is_dialog_open(state):
         return "a"
     ensure_porymap_state(state)
@@ -545,8 +566,11 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
     x, y, goal_x, goal_y = int(x), int(y), int(goal_x), int(goal_y)
     facing = state.get("facing") or (state.get("player") or {}).get("facing")
 
-    # Block the live NPC/trainer tiles (the static collision map omits them).
+    # Block the live NPC/trainer tiles (the static collision map omits them), plus any
+    # caller-supplied tiles (e.g. a Centre door we must not path back through).
     blocked = _npc_blocked_tiles(state.get("_env"), exclude_xy=(x, y))
+    if extra_blocked:
+        blocked = blocked + [t for t in extra_blocked if t != (x, y)]
 
     # Heatz's original pathfinding interacts with adjacent NPC/object goals.
     # Several generated policies target object coordinates, e.g. Birch's bag.
@@ -620,6 +644,136 @@ def grind_action(state: dict[str, Any], grind_state: dict[str, Any]) -> str:
         idx ^= 1
         grind_state["idx"] = idx
     return find_path_action(state, waypoints[idx][0], waypoints[idx][1])
+
+
+# Max Manhattan distance allowed between a town's Pokémon Centre and the current
+# event's goal for the auto-heal detour to be worth taking. Beyond this the detour
+# strands the event across town from its goal, so we skip and heal elsewhere. Sized
+# a bit above the emulator BFS fallback's reach (~14) so post-heal recovery is easy.
+_HEAL_MAX_DETOUR = 12
+
+
+def _member_hp(m: dict[str, Any]) -> int:
+    """Current HP of a party member, tolerant of both state formats: the compact
+    party_summary uses ``hp`` while the comprehensive reader uses ``current_hp``
+    (build_heatz_state swaps in the latter for map-aware events)."""
+    val = m.get("hp")
+    if val is None:
+        val = m.get("current_hp")
+    return val or 0
+
+
+def _party_full_hp(state: dict[str, Any]) -> bool:
+    party = (state.get("player") or {}).get("party") or []
+    if not party:
+        return True
+    return all(_member_hp(m) >= (m.get("max_hp") or 0) > 0 for m in party)
+
+
+def heal_action(state: dict[str, Any]) -> str:
+    """Walk to the town's Pokémon Center, heal at the nurse, then walk back out.
+    Centre interiors are identical across towns, so the nurse interaction tile (7,4)
+    is the same everywhere; the entrance/exit are found from the porymap warps."""
+    ensure_porymap_state(state)
+    loc = str((state.get("map") or {}).get("location") or "").upper()
+    porymap = (state.get("map") or {}).get("porymap") or {}
+    warps = porymap.get("warps") or []
+    pos = state.get("player", {}).get("position") or {}
+    x, y = int(pos.get("x") or 0), int(pos.get("y") or 0)
+    facing = state.get("facing") or (state.get("player") or {}).get("facing")
+
+    # During a warp the map name and the position update on different frames, so the
+    # player can read as "inside the Centre" while standing on the town door (or vice
+    # versa). Acting on that inconsistent frame is what makes us step back onto the
+    # warp and oscillate. If the position is outside the named map, wait it out.
+    dims = porymap.get("dimensions") or {}
+    w, h = dims.get("width"), dims.get("height")
+    if w and h and not (0 <= x < int(w) and 0 <= y < int(h)):
+        return "no_op"
+
+    def warp_xy(want_center: bool):
+        for warp in warps:
+            is_center = "POKEMON_CENTER" in str(warp.get("dest_map") or "").upper()
+            if is_center == want_center:
+                return int(warp.get("x")), int(warp.get("y"))
+        return None
+
+    goal = state.get("_heal_goal")
+    goal_here = goal if (goal and str(goal[0] or "").upper() == loc) else None
+
+    if "POKEMON CENTER" not in loc:  # in town
+        door = warp_xy(True)  # the tile whose warp leads into the Centre
+        if not _party_full_hp(state):
+            # Only take the Centre detour when we can confirm it won't strand the event:
+            # the goal must be in THIS town and within _HEAL_MAX_DETOUR of the Centre.
+            # Otherwise heal elsewhere (a closer town, or the route's dedicated Centre
+            # event). Cases that strand us: the goal is in another map (we're just
+            # passing through, e.g. BACK_TO_ROUTE101 exits north to Route 101), or it's
+            # far across town (BACK_TO_OLDALE finishes at the far north map edge).
+            if goal is not None:
+                if goal_here is None:
+                    return "heal_skip"
+                gx, gy = int(goal_here[1]), int(goal_here[2])
+                if door and abs(door[0] - gx) + abs(door[1] - gy) > _HEAL_MAX_DETOUR:
+                    return "heal_skip"
+            return find_path_action(state, *door) if door else "no_op"  # go heal
+        # Healed. Walk back to the event's goal tile so the detour hands back to the
+        # policy where the event expects to be (the emulator BFS fallback only reaches
+        # ~14 tiles), then idle. The detour was only taken when the goal is within
+        # _HEAL_MAX_DETOUR of the Centre, so this is a short, reliable hop.
+        if goal_here:
+            gx, gy = int(goal_here[1]), int(goal_here[2])
+            if abs(x - gx) + abs(y - gy) > 1:  # 1-tile tolerance matches the gate
+                # Block the Centre door so the route can't step back onto it (warp).
+                return find_path_action(state, gx, gy, extra_blocked=[door] if door else None)
+            return "no_op"
+        # No usable goal in this map: step one tile south off the door (the open
+        # approach is always below a Centre door), then idle. Never re-enter.
+        if door and (x, y) == tuple(door):
+            return "down"
+        return "no_op"
+    if not _party_full_hp(state):  # inside: reach the nurse (7,4) and heal
+        if is_dialog_open(state):
+            return "a"  # advance the nurse's heal dialog
+        nx, ny = 7, 4
+        if y == 8 and x in (6, 7):
+            return "up"  # don't step back onto the exit mat
+        if x != nx:
+            return "right" if x < nx else "left"
+        if y != ny:
+            return "up" if y > ny else "down"
+        if not _facing_matches_action(facing, "up"):
+            return "up"
+        return "a"
+    exit_xy = warp_xy(False)  # healed: walk back out
+    return find_path_action(state, *exit_xy) if exit_xy else "no_op"
+
+
+# Route 103's south edge connects to Oldale's north edge near x=10; stepping off the
+# edge there crosses between the maps. Used by the MAY heal detour to reach a Centre.
+_R103_OLDALE_CONNECTION = (10, 21)   # Route 103 south edge → Oldale
+_OLDALE_R103_CONNECTION = (10, 0)    # Oldale north edge → Route 103
+
+
+def may_heal_action(state: dict[str, Any]) -> str:
+    """One overworld step of the MAY Route-103 heal detour: descend south off Route 103
+    into Oldale, heal at the Centre, then climb back north to Route 103. Plain down/up
+    snags on the route's grass/ledges, so we pathfind to the map connection and step off
+    the edge there. The caller only invokes this out of battle (the policy fights any
+    wild battle on the way, with its persistent battle-cursor state); the descent reaches
+    the route's non-grass corridor in a step or two, so those battles are few."""
+    loc = str((state.get("map") or {}).get("location") or "").upper()
+    pos = state.get("player", {}).get("position") or {}
+    x, y = int(pos.get("x") or 0), int(pos.get("y") or 0)
+    if "POKEMON CENTER" in loc:
+        return heal_action(state)  # inside the Centre: heal at the nurse, then exit
+    if "OLDALE" in loc:  # in Oldale town
+        if not _party_full_hp(state):
+            return heal_action(state)  # walk to the Centre entrance
+        cx, cy = _OLDALE_R103_CONNECTION  # healed → climb north back to Route 103
+        return find_path_action(state, cx, cy) if y > cy + 1 else "up"
+    cx, cy = _R103_OLDALE_CONNECTION  # on Route 103 → descend to the Oldale connection
+    return find_path_action(state, cx, cy) if y < cy - 1 else "down"
 
 
 def log(message: object) -> None:
