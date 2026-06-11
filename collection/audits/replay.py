@@ -8,7 +8,7 @@ byte-for-byte against the recorded `ppu_state.bin` chain. Reports match rate + f
 show as an isolated ewram/iwram drift).
 
 Usage (no GPU needed):
-  CUDA_VISIBLE_DEVICES="" .venv/bin/python -m collection.audit_wm_replay \
+  CUDA_VISIBLE_DEVICES="" .venv/bin/python -m collection.audits.replay \
       --run ../pokemon-worldmodel/data/storyline_wm/CLOCK_INTERACT/attempt_000001
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from collection.render_state import BLOCK_SIZES, extract_full_ppu_state
-from collection.world_model_sink import _serialize_ppu as serialize_ppu
+from collection.world_model_sink import serialize_ppu
 
 
 def recorded_blobs(run_dir: Path):

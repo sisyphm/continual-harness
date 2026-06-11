@@ -1,12 +1,12 @@
 """Phase-0 audit — cb2 contact sheets: one image grid per distinct gMain.callback2 value, so each
 screen type can be labeled by INSPECTION (the empirical mode taxonomy — no trusting symbol lists).
 
-Reads the per-run RAM field files (audit_wm_ram) + the RGB chunks, samples up to `--per` frames per
+Reads the per-run RAM field files (audits.ram_fields) + the RGB chunks, samples up to `--per` frames per
 cb2 value (spread across runs), and writes `cb2_<value>__<count>f.png` sheets plus `cb2_index.json`
 (value -> frames, runs, battle/dark fractions, sampled frame refs).
 
 Usage:
-  .venv/bin/python -m collection.audit_wm_modes --data_root ../pokemon-worldmodel/data \
+  .venv/bin/python -m collection.audits.modes --data_root ../pokemon-worldmodel/data \
       --audit_dir ../pokemon-worldmodel/data/processed/audit
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 
 
 def main():

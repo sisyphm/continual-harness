@@ -11,7 +11,7 @@ training (`WORLD_MODEL_PLAN_RUNG_A_PRIME.md` §2):
   • NPC graphics_id support (frames on screen)
 
 Usage:
-  .venv/bin/python -m collection.audit_wm --data_root ../pokemon-worldmodel/data \
+  .venv/bin/python -m collection.audits.l1 --data_root ../pokemon-worldmodel/data \
       --out ../pokemon-worldmodel/data/processed/audit/audit_l1.json
 """
 
@@ -24,30 +24,14 @@ from pathlib import Path
 
 import numpy as np
 
+from collection.corpus import clip_starts, discover_runs
+
 DARK_THRESH = 30.0          # brightness below this = warp/fade black (validated in the v1 indexer)
 BUMP_STATIC_FRAMES = 24     # direction held + facing aligned + coords static this long = bump-ish
 DIRS = ("UP", "DOWN", "LEFT", "RIGHT")
 
 # stationary run-length histogram buckets (frames @60fps); ≥64 ≈ ≥1s of standing still
 IDLE_BUCKETS = ((1, 7), (8, 15), (16, 31), (32, 63), (64, 127), (128, 255), (256, 1 << 30))
-
-
-def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:
-    """All audit-able runs: (name, dir, kind) — storyline attempts + coverage seeds + behavior runs."""
-    runs = []
-    for seg in sorted((data_root / "storyline_wm").iterdir()):
-        for att in sorted(seg.glob("attempt_*")):
-            if (att / "semantic.jsonl").exists():
-                runs.append((seg.name, att, "storyline"))
-    for seed in sorted((data_root / "coverage_dataset").iterdir()):
-        if seed.is_dir() and (seed / "semantic.jsonl").exists():
-            runs.append((seed.name, seed, "coverage"))
-    beh = data_root / "behaviors"
-    if beh.exists():
-        for d in sorted(beh.iterdir()):
-            if (d / "semantic.jsonl").exists():
-                runs.append((d.name, d, "behavior"))
-    return runs
 
 
 def brightness_of(run_dir: Path, n_frames: int) -> np.ndarray:
@@ -68,11 +52,6 @@ def brightness_of(run_dir: Path, n_frames: int) -> np.ndarray:
         out[[p[0] for p in pairs]] = frames[idx].mean(axis=(1, 2, 3))
     np.save(cache, out)
     return out[:n_frames]
-
-
-def clip_starts(run_dir: Path) -> set[int]:
-    p = run_dir / "coverage_summary.json"
-    return set(json.loads(p.read_text()).get("clip_start_frames", [])) if p.exists() else set()
 
 
 def _bucket(n: int) -> str:

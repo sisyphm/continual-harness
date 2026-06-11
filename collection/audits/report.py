@@ -12,7 +12,7 @@ RAM fields (cb2, in_battle, species, BLDY, corrected objects). Produces `audit_r
     is static — the measured learned tail; samples dumped to a contact sheet for naming
 
 Usage:
-  .venv/bin/python -m collection.audit_wm_report --data_root ../pokemon-worldmodel/data
+  .venv/bin/python -m collection.audits.report --data_root ../pokemon-worldmodel/data
 """
 
 from __future__ import annotations
@@ -25,7 +25,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from collection.audit_wm import DARK_THRESH, IDLE_BUCKETS, discover_runs
+from collection.audits.l1 import DARK_THRESH, IDLE_BUCKETS
+from collection.corpus import discover_runs
 
 FD_THRESH = 2.0             # mean|Δ| above this = "pixels changed meaningfully"
 PLAYER_GFX = (0, 1)         # Brendan/May overworld gfx ids (excluded from NPC support)

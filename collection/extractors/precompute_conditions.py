@@ -11,7 +11,7 @@ import argparse
 from multiprocessing import Pool
 from pathlib import Path
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 from collection.extractors.conditions import precompute_run
 
 ROM = Path(__file__).resolve().parents[2] / "Emerald-GBAdvance/rom.gba"

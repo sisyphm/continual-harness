@@ -3,7 +3,7 @@
 schema-v0 condition doesn't = the learned tail (or missing state), made measurable.
 
 Usage:
-  .venv/bin/python -m collection.audit_wm_framediff --data_root ../pokemon-worldmodel/data
+  .venv/bin/python -m collection.audits.framediff --data_root ../pokemon-worldmodel/data
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 
 
 def framediff_of(run_dir: Path) -> np.ndarray:

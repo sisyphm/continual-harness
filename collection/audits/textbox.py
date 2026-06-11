@@ -9,7 +9,7 @@ This flag is what separates "standing in dialogue/cutscene" from FREE IDLE in th
 numbers, and gives the dialogue-mode mass for the coverage report.
 
 Usage:
-  .venv/bin/python -m collection.audit_wm_textbox --data_root ../pokemon-worldmodel/data
+  .venv/bin/python -m collection.audits.textbox --data_root ../pokemon-worldmodel/data
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 
 # message-box interior band (excludes the border): rows 116..152, cols 16..224 at 240x160.
 # Probed on real frames: dialogue interiors mean 223-247 (text glyphs RAISE std — no std test);

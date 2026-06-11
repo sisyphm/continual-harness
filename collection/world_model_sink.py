@@ -12,10 +12,12 @@ from pathlib import Path
 
 import numpy as np
 
+from collection.extractors.entities import entities
+from collection.extractors.ram import GBAState
 from collection.render_state import BLOCK_SIZES, extract_full_ppu_state, state_from_blocks
 
 
-def _serialize_ppu(state: dict) -> bytes:
+def serialize_ppu(state: dict) -> bytes:
     return b"".join(state[name] for name, _ in BLOCK_SIZES)
 
 
@@ -40,7 +42,7 @@ class PPUDeltaWriter:
         self.bytes_written = 0
 
     def add(self, frame_idx: int, state: dict) -> None:
-        blob = np.frombuffer(_serialize_ppu(state), dtype=np.uint8)
+        blob = np.frombuffer(serialize_ppu(state), dtype=np.uint8)
         if self.prev is None or self.n % self.kfi == 0:
             kind, payload = b"K", blob
         else:
@@ -59,9 +61,11 @@ class PPUDeltaWriter:
         Path(name + ".idx.json").write_text(json.dumps({"block_sizes": BLOCK_SIZES, "frames": self.index}))
 
 
-def extract_objects(env) -> list:
-    """Active gObjectEvents: graphics_id (identity) + tile coords. Read directly (the
-    convenience reader over-filters)."""
+def extract_objects_v1_legacy(env) -> list:
+    """The v1-era object reader — WRONG layout (stride 68, gfx@+0x03; truth is 0x24/+0x05, see
+    `extractors.entities`), so its output is garbage. Kept ONLY because the v1 model was TRAINED
+    on this stream: the v1 live demo must keep feeding the same distribution at inference.
+    Every new consumer uses `extractors.entities` (the sink below already does)."""
     BASE, SZ = 0x02037230, 68
     out = []
     for i in range(16):
@@ -89,9 +93,18 @@ class WorldModelSink:
         env = runner.env
         self.ppu.add(runner.frame_idx, extract_full_ppu_state(env))
         nav = runner.nav_state()
+        # objects + facing via the VALIDATED extractor (extractors.entities over the live seam).
+        # Runs recorded before 2026-06 carry the legacy garbage objects and input-tracker facing
+        # instead — schema_version in docs/SCHEMA.md marks the cut; the A′ precompute never read
+        # either field (it re-extracts from the PPU blobs), so old and new runs train identically.
+        ents = entities(GBAState.from_env(env))
+        player = next((e for e in ents if e.is_player), None)
         self.sem.write(json.dumps({
-            "frame": runner.frame_idx, "x": nav.x, "y": nav.y, "facing": runner.facing,
-            "map": nav.map, "in_battle": nav.in_battle, "objects": extract_objects(env),
+            "frame": runner.frame_idx, "x": nav.x, "y": nav.y,
+            "facing": (player.facing if player and player.facing else runner.facing),
+            "map": nav.map, "in_battle": nav.in_battle,
+            "objects": [{"slot": e.slot, "graphics_id": e.graphics_id, "local_id": e.local_id,
+                         "x": e.x, "y": e.y, "facing": e.facing} for e in ents if not e.is_player],
         }) + "\n")
         self.frames += 1
 

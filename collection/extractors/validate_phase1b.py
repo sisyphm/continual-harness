@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 from collection.extractors.battle import battle_state, in_battle
 from collection.extractors.ram import iter_states
 from collection.extractors.text import text_state

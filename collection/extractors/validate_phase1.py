@@ -34,7 +34,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 from collection.extractors.entities import entities as all_entities
 from collection.extractors.entities import npcs, player_state
 from collection.extractors.ram import GBAState, iter_states

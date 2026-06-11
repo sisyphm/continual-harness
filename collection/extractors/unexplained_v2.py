@@ -18,7 +18,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.audit_wm import discover_runs
+from collection.corpus import discover_runs
 
 FD_THRESH = 2.0
 FIELDS_EQ = ("mode", "in_battle", "cam", "bld", "win_mask", "player_xy", "player_facing",
