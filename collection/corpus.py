@@ -59,7 +59,8 @@ def write_manifest(data_root: Path, out: Path | None = None) -> Path:
                              f"need a naming extension in precompute_conditions first")
         seen.add(key)
         n_frames = sum(1 for _ in (d / "semantic.jsonl").open())
-        runs.append({"run_key": key, "kind": kind, "name": name, "dir": str(d.resolve()),
+        runs.append({"run_key": key, "kind": kind, "name": name,
+                     "dir": str(d.resolve().relative_to(data_root.resolve())),   # portable: rel to data root
                      "frames": n_frames, "clip_starts": sorted(clip_starts(d))})
     out = out or (data_root / "processed" / "corpus_manifest.json")
     out.parent.mkdir(parents=True, exist_ok=True)

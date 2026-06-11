@@ -11,8 +11,9 @@ import argparse
 from multiprocessing import Pool
 from pathlib import Path
 
-from collection.corpus import discover_runs
+from collection.corpus import discover_runs, write_manifest
 from collection.extractors.conditions import precompute_run
+from collection.extractors.text import export_charset
 
 ROM = Path(__file__).resolve().parents[2] / "Emerald-GBAdvance/rom.gba"
 
@@ -32,6 +33,8 @@ def main():
     ap.add_argument("--workers", type=int, default=10)
     args = ap.parse_args()
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    export_charset(out_dir / "charset.json")               # the charset's cross-repo home
+    write_manifest(Path(args.data_root))                   # the corpus as the model repo consumes it
     todo = []
     for name, d, kind in discover_runs(Path(args.data_root)):
         out = out_dir / f"{kind}__{name}.npz"

@@ -40,6 +40,18 @@ CHARSET.update({0xD5 + i: chr(ord("a") + i) for i in range(26)})
 CTRL = {0xFE: "\n", 0xFB: "\n", 0xFA: "\n", 0xFC: "", 0xFD: "?"}   # newline-ish / ctl / var marker
 
 
+def export_charset(path) -> None:
+    """Write the charset as data (`conditions/charset.json`) — THE cross-repo home. The model
+    repo's text-token encoder asserts against this file (its encode table must invert CHARSET),
+    instead of two repos silently maintaining mirror tables."""
+    import json
+    from pathlib import Path
+    Path(path).write_text(json.dumps(
+        {"charset": {str(k): v for k, v in sorted(CHARSET.items())},
+         "ctrl": {str(k): v for k, v in sorted(CTRL.items())},
+         "terminator": 0xFF}, ensure_ascii=False, indent=1))
+
+
 def decode(raw: bytes) -> str:
     """Gen-3 bytes -> str (stops at the 0xFF terminator)."""
     out = []

@@ -178,7 +178,8 @@ class RunConditionWriter:
             arrs[f"grid_{k}"] = g
         out.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(out, **arrs)
-        sidecar = {"frames": n, "n_grids": len(self.grids),
+        from collection.corpus import SCHEMA_VERSION
+        sidecar = {"schema_version": SCHEMA_VERSION, "frames": n, "n_grids": len(self.grids),
                    "texts": [s for s, _ in sorted(self.texts.items(), key=lambda kv: kv[1])]}
         out.with_suffix(".json").write_text(json.dumps(sidecar, ensure_ascii=False))
 
