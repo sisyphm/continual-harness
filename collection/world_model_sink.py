@@ -61,10 +61,10 @@ class PPUDeltaWriter:
         Path(name + ".idx.json").write_text(json.dumps({"block_sizes": BLOCK_SIZES, "frames": self.index}))
 
 
-def extract_objects_v1_legacy(env) -> list:
+def extract_objects_v0_legacy(env) -> list:
     """The v1-era object reader — WRONG layout (stride 68, gfx@+0x03; truth is 0x24/+0x05, see
-    `extractors.entities`), so its output is garbage. Kept ONLY because the v1 model was TRAINED
-    on this stream: the v1 live demo must keep feeding the same distribution at inference.
+    `extractors.entities`), so its output is garbage. Kept ONLY because the v0 model was TRAINED
+    on this stream: the v0 live demo must keep feeding the same distribution at inference.
     Every new consumer uses `extractors.entities` (the sink below already does)."""
     BASE, SZ = 0x02037230, 68
     out = []
