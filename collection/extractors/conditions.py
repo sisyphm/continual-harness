@@ -100,7 +100,7 @@ class RunConditionWriter:
         if ts is not None and ts.text.strip():
             r["text"] = (1, self._text_id(ts.text), min(ts.reveal, 65535))
         elif wm[TEXTBOX_ROWS].any():                          # finished box awaiting input
-            msg = last_message(st)
+            msg = last_message(st, in_battle=bool(r["in_battle"]))
             r["text"] = (2, self._text_id(msg), min(len(msg), 65535)) if msg.strip() else (0, -1, 0)
         else:
             r["text"] = (0, -1, 0)

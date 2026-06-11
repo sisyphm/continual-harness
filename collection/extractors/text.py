@@ -69,11 +69,17 @@ def _read_span(st: GBAState, addr: int, n: int, rom: bytes | None) -> bytes | No
     return None
 
 
-def last_message(st: GBAState) -> str:
-    """The most recent composed message (gStringVar4 persists after the printer finishes).
-    Condition-builder rule: while a textbox is VISIBLE but no printer is active (typing done,
-    waiting for A — measured as ~10% of dialogue frames), condition on this with reveal=full."""
-    return decode(st.bytes(GSTRINGVAR4, MAX_TEXT))
+G_DISPLAYED_STRING_BATTLE = 0x02022E2C     # the battle UI's own message buffer (validated: holds
+                                           # the exact on-screen battle text while gStringVar4
+                                           # holds a STALE overworld string during battles)
+
+
+def last_message(st: GBAState, in_battle: bool = False) -> str:
+    """The most recent composed message for the finished-box state (no active printer).
+    Overworld dialogue persists in gStringVar4; BATTLE text lives in gDisplayedStringBattle —
+    using gStringVar4 in battle conditions ~30% of the corpus on wrong text (caught pre-training)."""
+    addr = G_DISPLAYED_STRING_BATTLE if in_battle else GSTRINGVAR4
+    return decode(st.bytes(addr, MAX_TEXT))
 
 
 def text_state(st: GBAState, rom: bytes | None = None) -> TextState | None:
