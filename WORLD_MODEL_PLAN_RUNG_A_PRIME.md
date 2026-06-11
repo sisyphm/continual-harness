@@ -1,3 +1,7 @@
+> **FROZEN ARCHIVE (the A′ design as planned).** The project is now tracked by exactly two living
+> documents: `pokemon-worldmodel/docs/PLAN.md` (plans/status) and
+> `pokemon-worldmodel/docs/STRUCTURE.md` (codebase/contracts). Do not update this file.
+
 # Rung A′ — Identity-Conditioned Full-Modality World Model (start → Stone Badge)
 
 > Detailed design + execution plan for the next training generation. Child document of

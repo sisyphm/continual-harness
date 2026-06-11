@@ -1,3 +1,7 @@
+> **FROZEN ARCHIVE (north star / ladder / v1-era status).** The project is now tracked by exactly two living
+> documents: `pokemon-worldmodel/docs/PLAN.md` (plans/status) and
+> `pokemon-worldmodel/docs/STRUCTURE.md` (codebase/contracts). Do not update this file.
+
 # Emerald World Model — Long-Term Plan & Status
 
 > Single canonical north-star + living status doc for the generative world-model research.

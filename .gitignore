@@ -25,10 +25,8 @@ pokemon_red_env/test/output_game_state/*
 *.log
 
 
-# Untracked internal docs/tools (contract docs are explicitly re-included)
-docs/*
-!docs/SCHEMA.md
-!docs/ADDRESSES.md
+# Untracked internal docs/tools
+docs/
 System-Design/personal_notes/
 System-Design/plans/
 

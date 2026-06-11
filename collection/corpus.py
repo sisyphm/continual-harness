@@ -10,7 +10,7 @@ The world-model corpus is three families of run directories under the model repo
 Everything that walks the corpus — condition precompute, the audit chain, the model repo's clip
 indexer — goes through `discover_runs` (directly, or via the manifest `write_manifest` emits into
 `data/processed/`, which is the cross-repo interface so the model repo never re-implements
-discovery). Schema details: docs/SCHEMA.md.
+discovery). Schema details: pokemon-worldmodel/docs/STRUCTURE.md §3.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import argparse
 import json
 from pathlib import Path
 
-SCHEMA_VERSION = 2          # version of the recorded-run/conditions schema (see docs/SCHEMA.md)
+SCHEMA_VERSION = 2          # version of the recorded-run/conditions schema (pokemon-worldmodel docs/STRUCTURE.md §3)
 
 
 def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:

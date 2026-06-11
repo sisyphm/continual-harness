@@ -95,7 +95,7 @@ class WorldModelSink:
         nav = runner.nav_state()
         # objects + facing via the VALIDATED extractor (extractors.entities over the live seam).
         # Runs recorded before 2026-06 carry the legacy garbage objects and input-tracker facing
-        # instead — schema_version in docs/SCHEMA.md marks the cut; the A′ precompute never read
+        # instead — schema_version marks the cut (pokemon-worldmodel docs/STRUCTURE.md §3); the A′ precompute never read
         # either field (it re-extracts from the PPU blobs), so old and new runs train identically.
         ents = entities(GBAState.from_env(env))
         player = next((e for e in ents if e.is_player), None)

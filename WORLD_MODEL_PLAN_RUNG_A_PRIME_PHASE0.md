@@ -1,3 +1,7 @@
+> **FROZEN ARCHIVE (Phase-0/2 audit results + acceptance).** The project is now tracked by exactly two living
+> documents: `pokemon-worldmodel/docs/PLAN.md` (plans/status) and
+> `pokemon-worldmodel/docs/STRUCTURE.md` (codebase/contracts). Do not update this file.
+
 # Phase 0 — Coverage & Sufficiency Audit (RESULTS)
 
 > Deliverable of `WORLD_MODEL_PLAN_RUNG_A_PRIME.md` §2, executed 2026-06-10 over the full recorded
