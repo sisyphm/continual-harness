@@ -316,9 +316,26 @@ def job_warp_cycle(runner, rng: random.Random, budget: int):
             _hold(runner, [rng.choice(DIRS)], rng.randint(16, 32), "warp_roam")
 
 
+# Start-menu cursor slot, PINNED live (+1 per DOWN, -1 per UP, WRAPS mod entry count — the
+# wrap is why blind UP×7 anchoring silently landed on SAVE once the cursor was remembered at
+# BAG). Mirrored by the generic menu cursor at 0x0203CD92; both found by the same probe.
+START_MENU_CURSOR = 0x0203760E
+SLOT_BAG = 2                                                  # with the Pokédex (all our bases)
+
+
+def _seek_start_slot(runner, slot: int, phase: str) -> bool:
+    """Move the (already open) START menu cursor to `slot` by RAM feedback; wrap-proof."""
+    from collection.extractors.ram import GBAState
+    for _ in range(10):
+        if GBAState.snapshot(runner.env).u8(START_MENU_CURSOR) == slot:
+            return True
+        _hold(runner, ["DOWN"], 4, phase); _hold(runner, [], 14, phase)
+    return False
+
+
 def _cast_rod(runner) -> bool:
     """One Old Rod cast via the overworld bag; True when the cast visibly started (the fishing
-    dots box opens). Anchors the START-menu cursor (UP×7 — no wrap), then BAG = DOWN×2; the bag
+    dots box opens). The START-menu cursor seeks BAG by RAM feedback (wrap-proof); the bag
     REMEMBERS its pocket across opens (the ball-thrower lesson), so the KEY-ITEMS pocket offset
     self-aligns on dots-box feedback. The fishing UI bypasses the text printers entirely, so the
     window mask is the only cast signal."""
@@ -327,9 +344,11 @@ def _cast_rod(runner) -> bool:
         _hold(runner, [b], 4, "fish"); _hold(runner, [], wait, "fish")
     lefts = getattr(runner, "_bag_lefts", 1)                  # 1 on first open (bag starts ITEMS)
     press("START", 50)
-    for _ in range(7):
-        press("UP", 10)
-    press("DOWN"); press("DOWN"); press("A", 70)              # BAG
+    if not _seek_start_slot(runner, SLOT_BAG, "fish"):
+        for _ in range(3):
+            press("B", 20)
+        return False
+    press("A", 70)                                            # BAG
     for _ in range(lefts):
         press("LEFT", 35)                                     # to KEY ITEMS
     press("A", 40); press("A", 50)                            # OLD ROD -> USE
@@ -344,10 +363,35 @@ def _cast_rod(runner) -> bool:
     return False
 
 
+def _await_bite(runner, polls: int = 160) -> bool:
+    """Watch the open dots box for the bite. The fishing UI bypasses the text printers, so the
+    signal is VISUAL: each waiting dot repaints ~9 px, while 'Oh! A bite!' (and the session-
+    ending messages) repaint the whole line — 289+ px, measured live. Pressing A during the
+    dots CANCELS the cast ('not even a nibble'), so we must not touch A until this fires; the
+    bite window is only ~30 frames, hence the tight 6-frame screenshot poll. The dialog-open
+    check (a full snapshot) runs SPARSELY — tight snapshot polling core-dumps mgba."""
+    import numpy as np
+    from collection.navigator import _dialog_open
+
+    def box():                                                # textbox interior (rows 14-19)
+        return np.asarray(runner.screenshot())[112:160, 8:232].astype(np.int16)
+    prev = box()
+    for i in range(polls):
+        _hold(runner, [], 6, "fish")
+        cur = box()
+        delta = int((np.abs(cur - prev).max(axis=-1) > 40).sum())
+        prev = cur
+        if delta > 100:                                       # full-line repaint: bite (or end)
+            return True
+        if i % 8 == 7 and not _dialog_open(runner):           # box closed without a bite
+            return False
+    return False
+
+
 def job_fish(runner, rng: random.Random, budget: int):
     """Fishing: the ONLY pre-badge access to water/fish encounter tables (7 species, 0 frames
-    without this). Navigate to a castable shore cell, face the water, cast, hook on a timer
-    (the bite is invisible to the text extractor), resolve the battle, repeat."""
+    without this). Navigate to a castable shore cell, face the water, cast, react to the bite
+    (visual delta — see _await_bite), resolve the battle, repeat."""
     from collection.navigator import (DIRS as NDIRS, MapKnowledge, WATER, _state, _step,
                                       _unstick, goto, water_adjacent_goal)
     import numpy as np
@@ -374,15 +418,87 @@ def job_fish(runner, rng: random.Random, budget: int):
                 return
             if not _cast_rod(runner):
                 continue
-            _hold(runner, [], rng.randint(50, 160), "fish")   # the dots
-            for _ in range(20):                               # hook attempts
-                _hold(runner, ["A"], 4, "fish"); _hold(runner, [], 12, "fish")
-                if _in_battle(runner):
-                    break
+            if _await_bite(runner):                           # 'Oh! A bite!' -> react NOW
+                _hold(runner, ["A"], 4, "fish"); _hold(runner, [], 30, "fish")
+                for _ in range(12):                           # 'on the hook!' -> battle
+                    if _in_battle(runner):
+                        break
+                    _hold(runner, ["A"], 4, "fish"); _hold(runner, [], 16, "fish")
             _hold(runner, [], 240, "fish")                    # battle intro or back to field
             if _in_battle(runner):
                 _battle_one(runner, rng, "fight" if rng.random() < 0.6 else "catch")
             _unstick(runner, "fish")
+
+
+def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = ""):
+    """Trainer ENGAGEMENT: walk to every trainer NPC on the target map and start the fight
+    (talk-initiated; a line-of-sight engagement en route reaches the same battle). Trainer ids
+    come from the ROM manifest's object scripts (opcode 0x5C); savestate runs reset the
+    defeated-flags, so every run re-fights the same trainers. A trainer who talks WITHOUT
+    battling is already beaten this run -> done. Whiteouts teleport home; goto_map walks back."""
+    from collection.extractors.entities import npcs
+    from collection.extractors.ram import GBAState
+    from collection.navigator import DIRS as ND
+    from collection.navigator import MapKnowledge, _clear_dialog, _state, goto, goto_map
+    import numpy as np
+    mk = MapKnowledge()
+    fought: set = set()
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "fight")
+            continue
+        t, x, y = _state(runner)
+        if t is None:
+            _hold(runner, [], 30, "trainer_nav")
+            continue
+        key = f"{t.map_group},{t.map_num}"
+        if target_map and key != target_map:
+            if goto_map(runner, mk, target_map) not in ("arrived", "battle"):
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "trainer_nav")
+            continue
+        # the live ObjectEvent table only holds CAMERA-NEAR NPCs: target the ROM template
+        # coords, refined by the live record once the trainer is loaded (they wander)
+        live = {e.local_id: e for e in npcs(GBAState.snapshot(runner.env)) if abs(e.x) < 200}
+        targets = [(o, live.get(o["local_id"])) for o in mk.objects.get(key, [])
+                   if o.get("trainer_id") and o["local_id"] not in fought]
+        if not targets:
+            return                                            # every trainer here engaged
+        pos = lambda c: (c[1].x, c[1].y) if c[1] is not None else (c[0]["x"], c[0]["y"])
+        o, e = min(targets, key=lambda c: abs(pos(c)[0] - x) + abs(pos(c)[1] - y))
+        tx0, ty0 = (e.x, e.y) if e is not None else (o["x"], o["y"])
+
+        def goal(t_, beh, tx=tx0, ty=ty0):
+            m = np.zeros(t_.grid.shape, bool)
+            for dx, dy in ND:
+                gx, gy = tx + dx + 7, ty + dy + 7
+                if 0 <= gy < m.shape[0] and 0 <= gx < m.shape[1]:
+                    m[gy, gx] = True
+            return m & (((t_.grid >> 10) & 3) == 0)
+
+        r = goto(runner, mk, goal, budget=12000, phase="trainer_nav")
+        if r == "battle":
+            _battle_one(runner, rng, "fight")                 # LoS engagement; re-target after
+            continue
+        if r != "arrived":
+            fought.add(o["local_id"])                         # unreachable: don't loop on it
+            continue
+        t, x, y = _state(runner)
+        now = {n.local_id: n for n in npcs(GBAState.snapshot(runner.env)) if abs(n.x) < 200}
+        le = now.get(o["local_id"])
+        tx, ty = (le.x, le.y) if le is not None else (tx0, ty0)
+        d = {(1, 0): "RIGHT", (-1, 0): "LEFT", (0, 1): "DOWN", (0, -1): "UP"}.get(
+            (max(-1, min(1, tx - x)), max(-1, min(1, ty - y))), "UP")
+        _tap_turn(runner, d)
+        runner.perform_action("A", speed="normal", record_end_state=False)
+        _hold(runner, [], 60, "trainer_nav")
+        for _ in range(30):                                   # intro text -> battle
+            if _in_battle(runner):
+                break
+            _hold(runner, ["A"], 4, "trainer_nav"); _hold(runner, [], 14, "trainer_nav")
+        if _in_battle(runner):
+            _battle_one(runner, rng, "fight")
+        fought.add(o["local_id"])                             # battled, or already-beaten chatter
+        _clear_dialog(runner, "trainer_nav")
 
 
 def job_dialogue_nav(runner, rng: random.Random, budget: int):
@@ -462,10 +578,9 @@ def job_menus_labeled(runner, rng: random.Random, budget: int):
                 break
             runner.perform_action("START", speed="normal", record_end_state=False)
             _hold(runner, [], 30, "menus")
-            for _ in range(7):
-                _hold(runner, ["UP"], 4, "menus"); _hold(runner, [], 10, "menus")
-            for _ in range(slot):
-                _hold(runner, ["DOWN"], 4, "menus"); _hold(runner, [], 12, "menus")
+            if not _seek_start_slot(runner, slot, "menus"):   # RAM-feedback anchor (wrap-proof)
+                _hold(runner, ["B"], 4, "menus"); _hold(runner, [], 18, "menus")
+                continue
             start = runner.frame_idx
             for b in presses:
                 _hold(runner, [b], 4, "menus"); _hold(runner, [], 35, "menus")
@@ -530,9 +645,9 @@ def job_battle_far(runner, rng: random.Random, budget: int, target_map: str = ""
             if r != "arrived":
                 _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
             continue
-        r = goto_grass(runner, mk, budget=6000)
-        if r == "arrived":
-            pace_grass(runner, mk, rng, budget=4000)
+        r = goto_grass(runner, mk, budget=30000)              # Route 115: grass is ~75 tiles
+        if r == "arrived":                                    # from the Rustboro entrance
+            pace_grass(runner, mk, rng, budget=8000)
         elif r not in ("battle",):
             _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
 
@@ -546,6 +661,7 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "warp_cycle": job_warp_cycle,
         "fish": job_fish,
         "battle_far": job_battle_far,
+        "trainer_hunt": job_trainer_hunt,
         "dialogue_nav": job_dialogue_nav,
         "menus_labeled": job_menus_labeled,
         "story": job_story,

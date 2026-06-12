@@ -164,7 +164,17 @@ def main():
     enum_gfx = sorted({o["gfx"] for k in scope if k in maps for o in maps[k]["objects"]})
     rows["entities"] = [{"key": f"gfx{g}", "support": gfx_frames.get(g, 0),
                          "ok": gfx_frames.get(g, 0) >= FLOOR["entity_gfx"]} for g in enum_gfx]
-    wild_sp = sorted({sp for k in scope for t in M["wild"].get(k, {}).values() for sp, *_ in t["mons"]})
+    # enemy-species universe, ACCESS-AWARE (policy, 2026-06): 'water'/'rock' tables need Surf /
+    # Rock Smash (post-badge), the Old Rod only draws fish slots 0-1 (Good/Super Rod are
+    # post-badge), and Route 115 (0,30)'s grass sits behind a Surf-only elevation wall
+    # (navigator-proven: the walkable reach from the Rustboro entrance is a 300-cell pocket
+    # whose every frontier edge is a concrete 3->1 elevation mismatch). What a pre-badge player
+    # cannot encounter, the model never has to render.
+    surf_gated_land = {"0,30"}
+    wild_sp = sorted({sp
+                      for k in scope for kind, t in M["wild"].get(k, {}).items()
+                      if kind not in ("water", "rock") and not (kind == "land" and k in surf_gated_land)
+                      for sp, *_ in (t["mons"][:2] if kind == "fish" else t["mons"])})
     party_sp = sorted(set(M["party_space"]["starters"]) | set(M["party_space"]["catchable_in_scope"]))
     rows["species_enemy"] = [{"key": f"sp{s}", "support": sp_enemy.get(s, 0),
                               "ok": sp_enemy.get(s, 0) >= FLOOR["species_enemy"]} for s in wild_sp]

@@ -50,12 +50,14 @@ class MapKnowledge:
         self.warps = {}
         self.signs = {}
         self.connections = {}
+        self.objects = {}
         mf = Path(manifest_json)
         if mf.exists():
             m = json.loads(mf.read_text())["maps"]
             self.warps = {k: v["warps"] for k, v in m.items()}
             self.signs = {k: v["signs"] for k, v in m.items()}
             self.connections = {k: v["connections"] for k, v in m.items()}
+            self.objects = {k: v["objects"] for k, v in m.items()}
         self._attr_cache: dict[int, np.ndarray] = {}
 
     def _attrs(self, tileset_id: int) -> np.ndarray:
@@ -109,32 +111,64 @@ def _step(runner, d: str, max_frames: int = 48) -> bool:
     return False
 
 
-def _bfs_step(walk: np.ndarray, start: tuple[int, int], goals: np.ndarray) -> tuple[int, int] | None:
-    """First step (dx, dy) of a shortest path from start to any True cell of `goals` over the
-    walkable mask (buffer coords). None if unreachable."""
+# Jump-ledge behaviors: collision-1 tiles passable ONE WAY (entering in the jump direction
+# hops the walker 2 cells). The descent from Route 115's entrance plateau to its beach is
+# ONLY possible through these.
+_JUMP = {0x38: (1, 0), 0x39: (-1, 0), 0x3A: (0, -1), 0x3B: (0, 1)}
+
+
+def _bfs_step(walk: np.ndarray, start: tuple[int, int], goals: np.ndarray,
+              elev: np.ndarray | None = None,
+              beh: np.ndarray | None = None) -> tuple[int, int] | None:
+    """First step DIRECTION (dx, dy) of a shortest path from start to any True cell of `goals`
+    over the walkable mask (buffer coords). None if unreachable.
+
+    With `elev` (grid bits 12-15) the search is ELEVATION-AWARE: a cliff-top cell is collision-0
+    yet unenterable from below (Route 115 burned 40k frames walking UP into one). pokeemerald's
+    rule: a move is blocked when both elevations are concrete (not 0=transition / 15=bridge) and
+    differ; stepping onto a tile ADOPTS its elevation — including 0, which is how stairs connect
+    two levels (keeping the old concrete value walls off every ramp: instant dead-end on Route
+    115). Bridges (15) keep the walker's elevation. So the search state is (x, y, elev).
+    With `beh`, jump ledges add one-way 2-cell edges (see _JUMP)."""
     h, w = walk.shape
-    prev = -np.ones((h, w, 2), np.int32)
-    seen = np.zeros((h, w), bool)
-    q = deque([start])
-    seen[start[1], start[0]] = True
+    if elev is None:
+        elev = np.zeros((h, w), np.uint8)                     # all-transition: plain BFS
+    e0 = int(elev[start[1], start[0]])
+    s3 = (start[0], start[1], e0)
+    prev: dict = {s3: None}
+    q = deque([s3])
     hit = None
     while q:
-        x, y = q.popleft()
+        x, y, e = q.popleft()
         if goals[y, x] and (x, y) != start:
-            hit = (x, y)
+            hit = (x, y, e)
             break
         for dx, dy in DIRS:
             nx, ny = x + dx, y + dy
-            if 0 <= nx < w and 0 <= ny < h and not seen[ny, nx] and (walk[ny, nx] or goals[ny, nx]):
-                seen[ny, nx] = True
-                prev[ny, nx] = (x, y)
-                q.append((nx, ny))
+            if not (0 <= nx < w and 0 <= ny < h):
+                continue
+            if walk[ny, nx] or goals[ny, nx]:
+                te = int(elev[ny, nx])
+                if te not in (0, 15) and e not in (0, 15) and te != e:
+                    continue                                  # concrete elevation mismatch
+                n3 = (nx, ny, e if te == 15 else te)
+            elif beh is not None and _JUMP.get(int(beh[ny, nx])) == (dx, dy):
+                lx, ly = x + 2 * dx, y + 2 * dy               # ledge: hop over to the landing
+                if not (0 <= lx < w and 0 <= ly < h) or not walk[ly, lx]:
+                    continue
+                le = int(elev[ly, lx])
+                n3 = (lx, ly, e if le == 15 else le)
+            else:
+                continue
+            if n3 not in prev:
+                prev[n3] = (x, y, e)
+                q.append(n3)
     if hit is None:
         return None
-    x, y = hit
-    while tuple(prev[y, x]) != start:
-        x, y = prev[y, x]
-    return x - start[0], y - start[1]
+    while prev[hit] != s3:
+        hit = prev[hit]
+    dx, dy = hit[0] - start[0], hit[1] - start[1]
+    return max(-1, min(1, dx)), max(-1, min(1, dy))           # a first-step jump is 2 cells
 
 
 def _dialog_open(runner) -> bool:
@@ -172,10 +206,13 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
     """Walk toward the nearest goal cell; returns 'arrived' | 'battle' | 'stuck' | 'budget'.
     `goal_fn(t, beh) -> bool mask over buffer cells`. Replans every step; the first refused step
     triggers an unstick (script locks), repeated refusals transiently block the cell (NPCs,
-    wrong-side ledges) and route around."""
-    blocked: set[tuple[int, int]] = set()
+    wrong-side ledges) and route around. Blocks EXPIRE (~10 s — a wandering NPC moves on; a
+    stale block in a 1-2 cell choke like Route 115's ledge gap otherwise dead-ends the route),
+    and a dead-ended BFS clears them and retries: 'stuck' now means stuck on a CLEAN grid."""
+    blocked: dict[tuple[int, int], int] = {}                  # cell -> frame of the miss
     start_frame = runner.frame_idx
     misses = 0
+    resets = 0
     while runner.frame_idx - start_frame < budget:
         if _in_battle(runner):
             return "battle"
@@ -196,11 +233,18 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
         if goals[by, bx]:
             return "arrived"
         walk = ((t.grid >> 10) & 3) == 0
+        blocked = {c: f for c, f in blocked.items() if runner.frame_idx - f < 600}
         for cx, cy in blocked:
             if 0 <= cy < walk.shape[0] and 0 <= cx < walk.shape[1]:
                 walk[cy, cx] = False
-        step = _bfs_step(walk, (bx, by), goals)
+        step = _bfs_step(walk, (bx, by), goals,
+                         elev=((t.grid >> 12) & 0xF).astype(np.uint8), beh=beh)
         if step is None:
+            if blocked and resets < 4:                        # dead-ended by our own blocks
+                blocked.clear()
+                resets += 1
+                _hold(runner, [], 60, phase)                  # let the blocking NPC wander off
+                continue
             return "stuck"
         if _step(runner, DIRS[step]):
             misses = 0
@@ -209,7 +253,7 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
             if misses == 1:
                 _unstick(runner, phase)                       # script lock? clear before blaming
                 continue                                      # the cell
-            blocked.add((bx + step[0], by + step[1]))         # NPC / ledge: route around it
+            blocked[(bx + step[0], by + step[1])] = runner.frame_idx   # NPC / ledge: route around
             if misses >= 8:
                 return "stuck"
             _hold(runner, [], 10, phase)

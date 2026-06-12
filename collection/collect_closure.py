@@ -33,10 +33,10 @@ FRAMES = {"battle": 9000, "evolve": 11000, "catch": 12000, "fish": 16000}
 
 
 def _one(args: tuple) -> str:
-    name, state, frames, out, rom, seed, job = args
+    name, state, frames, out, rom, seed, job, *rest = args
     try:
         s = collect_behavior(job=job, load_state=state, output_dir=out, rom_path=rom,
-                             frames=frames, seed=seed)
+                             frames=frames, seed=seed, job_args=rest[0] if rest else None)
         return f"OK   {name}: {s['frames']} frames"
     except Exception as e:                                   # noqa: BLE001 — surface, don't kill the pool
         traceback.print_exc()
@@ -55,6 +55,8 @@ def main():
     ap.add_argument("--nav", action="store_true", help="navigator-driven battle jobs (battle_nav)")
     ap.add_argument("--warps", type=int, default=0, help="also schedule N warp_cycle runs over bases")
     ap.add_argument("--aux", action="store_true", help="schedule dialogue_nav/menus_labeled/story runs")
+    ap.add_argument("--trainer_maps", default="", help="semicolon-separated 'g,n' maps for trainer_hunt")
+    ap.add_argument("--far_maps", default="", help="semicolon-separated 'g,n[*N]' battle_far farms")
     args = ap.parse_args()
     root = Path(args.data_root)
     bank = json.loads((root / "processed/state_bank/bank.json").read_text())
@@ -95,6 +97,33 @@ def main():
         if not (out / "behavior_summary.json").exists():
             todo.append((f"warpcycle_{b['name']}", b["state"], args.frames or 15000,
                          str(out), args.rom, 7000 + j + 1000 * args.wave, "warp_cycle"))
+
+    # cross-map navigator jobs (wave-7 collectors): trainer engagement + far battle farms.
+    # Seeded from a base ON the target map when one exists (skips the goto_map trek), else the
+    # healed Rustboro storyline base (a mid-story party survives trainer fights).
+    by_map = {}
+    for b in bank["bases"]:
+        by_map.setdefault(b["map"], b)
+    far_base = next((b for b in bank["bases"] if "RUSTBORO" in b["name"]), bank["bases"][-1])
+    if args.trainer_maps:
+        for j, tm in enumerate(args.trainer_maps.split(";")):
+            base = by_map.get(tm, far_base)
+            out = root / "behaviors" / f"closure__trainers_{tm.replace(',', '-')}__w{args.wave}_{j:02d}"
+            if not (out / "behavior_summary.json").exists():
+                todo.append((f"trainers_{tm}", base["state"], args.frames or 45000,
+                             str(out), args.rom, 5000 + j + 1000 * args.wave, "trainer_hunt",
+                             {"target_map": tm}))
+    if args.far_maps:
+        for j, fm in enumerate(args.far_maps.split(";")):
+            mp, n = (fm.split("*") + ["1"])[:2]
+            base = by_map.get(mp, far_base)
+            for k in range(int(n)):
+                out = root / "behaviors" / (f"closure__farfarm_{mp.replace(',', '-')}"
+                                            f"__w{args.wave}_{j:02d}_{k:02d}")
+                if not (out / "behavior_summary.json").exists():
+                    todo.append((f"farfarm_{mp}_{k}", base["state"], args.frames or 60000,
+                                 str(out), args.rom, 6000 + j * 37 + k + 1000 * args.wave,
+                                 "battle_far", {"target_map": mp}))
     if args.limit:
         todo = todo[:args.limit]
     print(f"{len(todo)} closure runs to collect…")
