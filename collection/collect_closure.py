@@ -33,9 +33,9 @@ FRAMES = {"battle": 9000, "evolve": 11000, "catch": 12000}
 
 
 def _one(args: tuple) -> str:
-    name, state, frames, out, rom, seed = args
+    name, state, frames, out, rom, seed, job = args
     try:
-        s = collect_behavior(job="battle", load_state=state, output_dir=out, rom_path=rom,
+        s = collect_behavior(job=job, load_state=state, output_dir=out, rom_path=rom,
                              frames=frames, seed=seed)
         return f"OK   {name}: {s['frames']} frames"
     except Exception as e:                                   # noqa: BLE001 — surface, don't kill the pool
@@ -49,6 +49,7 @@ def main():
     ap.add_argument("--data_root", default="../pokemon-worldmodel/data")
     ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--limit", type=int, default=0, help="schedule at most N runs (pilot)")
+    ap.add_argument("--wave", type=int, default=1, help="run-dir suffix wave (re-runs entries)")
     ap.add_argument("--frames", type=int, default=0, help="override frames per run (pilot)")
     args = ap.parse_args()
     root = Path(args.data_root)
@@ -56,11 +57,12 @@ def main():
 
     todo = []
     for i, e in enumerate(bank["entries"]):
-        out = root / "behaviors" / f"closure__{e['name']}__{i:02d}"
+        out = root / "behaviors" / f"closure__{e['name']}__w{args.wave}_{i:02d}"
         if (out / "behavior_summary.json").exists():
             continue
         frames = args.frames or FRAMES[e["intent"]]
-        todo.append((e["name"], e["state"], frames, str(out), args.rom, 1000 + i))
+        job = "battle_catch" if e["intent"] == "catch" else "battle"
+        todo.append((e["name"], e["state"], frames, str(out), args.rom, 1000 + i, job))
     if args.limit:
         todo = todo[:args.limit]
     print(f"{len(todo)} closure runs to collect…")

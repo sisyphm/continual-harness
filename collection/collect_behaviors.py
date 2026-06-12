@@ -91,16 +91,63 @@ def job_fidget(runner, rng: random.Random, budget: int):
             _battle_one(runner, rng, "run")
 
 
+def _balls_qty(runner) -> int:
+    """Poké Ball count from the bag (security-key decode); -1 if the slot isn't Poké Balls."""
+    from collection.extractors.ram import GBAState
+    st = GBAState.snapshot(runner.env)
+    key16 = st.u32(st.u32(0x03005D90) + 0xAC) & 0xFFFF
+    a = st.u32(0x03005D8C) + 0x650
+    return st.u16(a + 2) ^ key16 if st.u16(a) == 4 else -1
+
+
+def _await_battle_menu(runner, max_advances: int = 60) -> bool:
+    """Advance battle text with A until the action menu ('What will X do?') is up."""
+    from collection.extractors.ram import GBAState
+    from collection.extractors.text import last_message
+    for _ in range(max_advances):
+        if not _in_battle(runner):
+            return False
+        if last_message(GBAState.snapshot(runner.env), in_battle=True).startswith("What will"):
+            return True
+        _hold(runner, ["A"], 4, "battle_text"); _hold(runner, [], 24, "battle_text")
+    return False
+
+
+def _throw_ball(runner) -> bool:
+    """One Poké Ball throw from the action menu. The battle bag REMEMBERS its pocket across opens
+    (visually established 2026-06-12), so blind navigation desyncs; we self-align with ball-count
+    feedback: if a throw didn't consume a ball, rotate one more pocket next time (5 pockets)."""
+    before = _balls_qty(runner)
+    if before <= 0:
+        return False
+    rights = getattr(runner, "_bag_rights", 1)        # pocket steps after opening (1 on first open:
+    for b in ["RIGHT", "A"] + ["RIGHT"] * rights + ["A", "A"]:        # the bag starts on ITEMS)
+        _hold(runner, [b], 4, "battle_catch"); _hold(runner, [], 50, "battle_catch")
+    _hold(runner, [], 700, "battle_catch")            # throw + shakes (or whatever happened)
+    after = _balls_qty(runner)
+    if after == before:                               # didn't throw: mis-aligned pocket — rotate
+        runner._bag_rights = (rights + 1) % 5
+        for _ in range(4):                            # close any half-open UI
+            _hold(runner, ["B"], 4, "battle_catch"); _hold(runner, [], 20, "battle_catch")
+        return False
+    runner._bag_rights = 0                            # bag auto-closed on the BALLS pocket
+    return True
+
+
 def _battle_one(runner, rng: random.Random, strategy: str, max_steps: int = 400):
-    """Play out one battle with the heatz battle machine ('fight'/'run'); 'catch' = best-effort
-    bag sequence with bail-outs. Faints/whiteouts are fine — wanted data; recording continues."""
+    """Play out one battle with the heatz battle machine ('fight'/'run'); 'catch' = weaken with one
+    fight turn, then up to 4 self-aligning ball throws (nickname/dex prompts are declined by the
+    fight fallback's navigation). Faints/whiteouts/breakouts are fine — wanted data."""
     steps = 0
     if strategy == "catch":
-        # FIGHT menu -> BAG -> first ball pocket item -> confirm; bail with B if it goes wrong
-        seq = ["B", "B", "RIGHT", "A", "A", "A"]
-        for act in seq:
-            runner.perform_action(act, speed="fast", record_end_state=False)
-        # whatever happened (throw animation / wrong submenu), fall through to fight-out the rest
+        if _await_battle_menu(runner):                # one FIGHT turn to weaken (better odds)
+            _hold(runner, ["A"], 4, "battle_catch"); _hold(runner, [], 40, "battle_catch")
+            _hold(runner, ["A"], 4, "battle_catch"); _hold(runner, [], 700, "battle_catch")
+        throws = 0
+        while throws < 4 and _in_battle(runner) and _await_battle_menu(runner):
+            if _throw_ball(runner):
+                throws += 1
+        # caught -> nickname/dex prompts; broke out -> battle continues: both handled below
         strategy = "fight"
     ui_mem: dict = {}                  # handle_battle keeps cursor-sequence counters in the state
     while _in_battle(runner) and steps < max_steps:                    # dict — persist them across
@@ -114,13 +161,17 @@ def _battle_one(runner, rng: random.Random, strategy: str, max_steps: int = 400)
     _hold(runner, [], 30, "battle_settle")
 
 
-def job_battle(runner, rng: random.Random, budget: int):
-    """Hunt encounters by wandering; resolve each with a mixed policy."""
+def job_battle(runner, rng: random.Random, budget: int, catchy: bool = False):
+    """Hunt encounters by wandering; resolve each with a mixed policy ('catchy' = catch-heavy,
+    for the closure catch axis: full ball pockets from the constructed bank)."""
     while runner.frame_idx < budget:
         _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
         if _in_battle(runner):
             r = rng.random()
-            strategy = "fight" if r < 0.55 else ("catch" if r < 0.8 else "run")
+            if catchy:
+                strategy = "catch" if r < 0.7 else "fight"
+            else:
+                strategy = "fight" if r < 0.55 else ("catch" if r < 0.8 else "run")
             _battle_one(runner, rng, strategy)
 
 
@@ -193,7 +244,10 @@ def job_run(runner, rng: random.Random, budget: int):
             _battle_one(runner, rng, "run")
 
 
+import functools
+
 JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
+        "battle_catch": functools.partial(job_battle, catchy=True),
         "menus": job_menus, "dialogue": job_dialogue, "run": job_run}
 
 
