@@ -170,6 +170,33 @@ def main():
                               "ok": sp_enemy.get(s, 0) >= FLOOR["species_enemy"]} for s in wild_sp]
     rows["species_player"] = [{"key": f"sp{s}", "support": sp_player.get(s, 0),
                                "ok": sp_player.get(s, 0) >= FLOOR["species_player"]} for s in party_sp]
+    # trainers: enemy (species, level) frames matched against enumerated party leads
+    trainer_ids = sorted({o["trainer_id"] for k in scope if k in maps
+                          for o in maps[k]["objects"] if o.get("trainer_id")})
+    lead = {t["id"]: tuple(t["party"][0]) for t in M["trainers"] if t["party"]}
+    sl_frames = Counter()
+    for f in sorted((root / "processed/conditions").glob("*.npz")):
+        z = np.load(f)
+        bv, bs, bl = z["bat_valid"] > 0, z["bat_species"], z["bat_level"]
+        m1 = bv[:, 1]
+        for (s_, l_), c_ in zip(*[list(x) for x in np.unique(
+                np.stack([bs[:, 1][m1], bl[:, 1][m1]], 1), axis=0, return_counts=True)] if m1.any() else ([], [])):
+            sl_frames[(int(s_), int(l_))] += int(c_)
+    rows["trainers"] = [{"key": f"tr{t}", "support": sl_frames.get(lead.get(t, (0, 0)), 0),
+                         "ok": sl_frames.get(lead.get(t, (0, 0)), 0) >= 500} for t in trainer_ids]
+
+    # menus: labeled frames from the crawler's sidecars (labels.jsonl per run)
+    label_frames = Counter()
+    for lab in (root / "behaviors").glob("*/labels.jsonl"):
+        for line in lab.open():
+            r_ = json.loads(line)
+            label_frames[r_["label"]] += max(0, r_["end"] - r_["start"])
+    rows["menus"] = [{"key": lb, "support": label_frames.get(lb, 0),
+                      "ok": label_frames.get(lb, 0) >= 1500}
+                     for lb in sorted(set(label_frames) |
+                                      {"start_menu", "pokedex", "party", "summary_info",
+                                       "bag_items", "trainer_card", "save_dialog", "options"})]
+
     charset = json.loads((root / "processed/conditions/charset.json").read_text())["charset"]
     rows["glyphs"] = [{"key": repr(ch), "support": glyphs.get(ch, 0),
                        "ok": glyphs.get(ch, 0) >= FLOOR["glyph"]} for ch in sorted(set(charset.values()))]

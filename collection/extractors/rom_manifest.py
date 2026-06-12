@@ -98,11 +98,20 @@ def walk_maps(r: Rom) -> dict[str, dict]:
                 if r.ok(op):
                     for i in range(n_obj):                       # ObjectEventTemplate, 24 B
                         o = op + i * 24
-                        m["objects"].append({
-                            "local_id": r.u8(o), "gfx": r.u8(o + 1),
-                            "x": r.s16(o + 4), "y": r.s16(o + 6),
-                            "movement": r.u8(o + 9), "trainer_type": r.u16(o + 12),
-                            "has_script": int(r.ok(r.u32(o + 16)))})
+                        obj = {"local_id": r.u8(o), "gfx": r.u8(o + 1),
+                               "x": r.s16(o + 4), "y": r.s16(o + 6),
+                               "movement": r.u8(o + 9), "trainer_type": r.u16(o + 12),
+                               "has_script": int(r.ok(r.u32(o + 16)))}
+                        sp_ = r.u32(o + 16)
+                        if obj["trainer_type"] and r.ok(sp_):    # parse `trainerbattle` (0x5C):
+                            raw = r.b[sp_ - ROM_BASE:sp_ - ROM_BASE + 96]
+                            for j in range(len(raw) - 4):        # opcode, type u8, trainer u16
+                                if raw[j] == 0x5C and raw[j + 1] <= 12:
+                                    tid = raw[j + 2] | (raw[j + 3] << 8)
+                                    if 0 < tid < 855:
+                                        obj["trainer_id"] = tid
+                                        break
+                        m["objects"].append(obj)
                 if r.ok(wp):
                     for i in range(n_warp):                      # WarpEvent, 8 B
                         o = wp + i * 8

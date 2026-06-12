@@ -49,11 +49,13 @@ class MapKnowledge:
         self.maps = {k: tuple(v) for k, v in ts["maps"].items()}
         self.warps = {}
         self.signs = {}
+        self.connections = {}
         mf = Path(manifest_json)
         if mf.exists():
             m = json.loads(mf.read_text())["maps"]
             self.warps = {k: v["warps"] for k, v in m.items()}
             self.signs = {k: v["signs"] for k, v in m.items()}
+            self.connections = {k: v["connections"] for k, v in m.items()}
         self._attr_cache: dict[int, np.ndarray] = {}
 
     def _attrs(self, tileset_id: int) -> np.ndarray:
@@ -258,6 +260,100 @@ def pace_grass(runner, mk: MapKnowledge, rng, budget: int = 4000) -> str:
         dx, dy = rng.choice(opts)
         _step(runner, DIRS[(dx, dy)])
     return "budget"
+
+
+# MapConnection directions (pokeemerald): 1=south 2=north 3=west 4=east
+_CONN_EDGE = {1: ("DOWN", lambda t: t.map_height - 1, "y"), 2: ("UP", 0, "y"),
+              3: ("LEFT", 0, "x"), 4: ("RIGHT", lambda t: t.map_width - 1, "x")}
+
+
+def cross_connection(runner, mk: MapKnowledge, direction: int, *, budget: int = 8000) -> str:
+    """Walk off the map edge in `direction` (a manifest connection); 'crossed' | failures."""
+    t0, _, _ = _state(runner)
+    if t0 is None or direction not in _CONN_EDGE:
+        return "stuck"
+    src = (t0.map_group, t0.map_num)
+    d, edge, axis = _CONN_EDGE[direction]
+
+    def crossed(t):
+        if (t.map_group, t.map_num) != src:
+            _hold(runner, [], 90, "nav_conn")
+            return "crossed"
+        return None
+
+    def goal(t, beh):
+        e = edge(t) if callable(edge) else edge
+        m = np.zeros(t.grid.shape, bool)
+        if axis == "y":
+            m[e + 7, 7:7 + t.map_width] = True
+        else:
+            m[7:7 + t.map_height, e + 7] = True
+        return m & (((t.grid >> 10) & 3) == 0)
+
+    r = goto(runner, mk, goal, budget=budget, phase="nav_conn", stop_fn=crossed)
+    if r != "arrived":
+        return r
+    for _ in range(4):                                        # step off the edge, map-watched
+        _step(runner, d)
+        t, _, _ = _state(runner)
+        if t is not None and (c := crossed(t)):
+            return c
+    return "stuck"
+
+
+def map_route(mk: MapKnowledge, src: str, dst: str) -> list[tuple] | None:
+    """BFS over the map graph -> [(hop_kind, hop, on_map_key), ...]; skips link rooms (policy)
+    and counter maps (the Center-2F trap)."""
+    def hazardous(k):
+        return any(w["dst_map"].startswith("25,") for w in mk.warps.get(k, []))
+    prev: dict[str, tuple] = {src: None}
+    q = deque([src])
+    while q:
+        k = q.popleft()
+        if k == dst:
+            hops = []
+            while prev[k] is not None:
+                pk, hop = prev[k]
+                hops.append(hop + (pk,))
+                k = pk
+            return hops[::-1]
+        for w in mk.warps.get(k, []):
+            e = w["dst_map"]
+            if e not in prev and not e.startswith("25,") and (e == dst or not hazardous(e)):
+                prev[e] = (k, ("warp", w))
+                q.append(e)
+        for c in mk.connections.get(k, []):
+            e = c["dst_map"]
+            if e not in prev and (e == dst or not hazardous(e)):
+                prev[e] = (k, ("conn", c))
+                q.append(e)
+    return None
+
+
+def goto_map(runner, mk: MapKnowledge, dst: str, *, hop_budget: int = 9000,
+             max_hops: int = 12) -> str:
+    """Navigate ACROSS maps to `dst` (warp + connection hops, re-routed per hop)."""
+    for _ in range(max_hops):
+        t, _, _ = _state(runner)
+        if t is None:
+            _hold(runner, [], 30, "nav_map")
+            continue
+        cur = f"{t.map_group},{t.map_num}"
+        if cur == dst:
+            return "arrived"
+        route = map_route(mk, cur, dst)
+        if not route:
+            return "stuck"
+        kind, hop, _on = route[0]
+        if kind == "warp":
+            r = goto_warp(runner, mk, hop["x"], hop["y"], budget=hop_budget)
+        else:
+            r = cross_connection(runner, mk, hop["direction"], budget=hop_budget)
+        if r == "battle":
+            return "battle"
+        if r not in ("crossed",):
+            _unstick(runner, "nav_map")                       # try re-routing from wherever we are
+    return "stuck"
 
 
 def goto_warp(runner, mk: MapKnowledge, wx: int, wy: int, *, budget: int = 8000) -> str:

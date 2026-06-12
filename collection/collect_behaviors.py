@@ -511,6 +511,32 @@ def job_story(runner, rng: random.Random, budget: int):
             _hold(runner, [rng.choice(DIRS)], rng.randint(8, 24), "story")
 
 
+def job_battle_far(runner, rng: random.Random, budget: int, target_map: str = ""):
+    """Battle farming on a DIFFERENT map: goto_map there (warp/connection hops), then the
+    navigator grass loop — unlocks enemy species whose maps have no checkpoint base
+    (Route-116-area land reds)."""
+    from collection.navigator import MapKnowledge, _state, goto_grass, goto_map, pace_grass
+    mk = MapKnowledge()
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "fight" if rng.random() < 0.7 else "run")
+            continue
+        t, _, _ = _state(runner)
+        cur = f"{t.map_group},{t.map_num}" if t else ""
+        if target_map and cur != target_map:
+            r = goto_map(runner, mk, target_map)
+            if r == "battle":
+                continue
+            if r != "arrived":
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
+            continue
+        r = goto_grass(runner, mk, budget=6000)
+        if r == "arrived":
+            pace_grass(runner, mk, rng, budget=4000)
+        elif r not in ("battle",):
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
+
+
 import functools
 
 JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
@@ -519,6 +545,7 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "battle_nav_catch": functools.partial(job_battle_nav, catchy=True),
         "warp_cycle": job_warp_cycle,
         "fish": job_fish,
+        "battle_far": job_battle_far,
         "dialogue_nav": job_dialogue_nav,
         "menus_labeled": job_menus_labeled,
         "story": job_story,
@@ -526,7 +553,8 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
 
 
 def collect_behavior(*, job: str, load_state: str, output_dir: str, rom_path: str,
-                     frames: int, seed: int = 0, backend: str = "npz") -> dict:
+                     frames: int, seed: int = 0, backend: str = "npz",
+                     job_args: dict | None = None) -> dict:
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
     with ChunkRecorder(out, run_id=f"behavior_{job}", emulator_fps=60, visual_fps=60,
@@ -537,7 +565,7 @@ def collect_behavior(*, job: str, load_state: str, output_dir: str, rom_path: st
                                       emulator_fps=60, frame_hook=sink.capture)
         runner.initialize(); sink.capture(runner)
         runner.settle_to_free_overworld()
-        JOBS[job](runner, rng, frames)
+        JOBS[job](runner, rng, frames, **(job_args or {}))
         n = runner.frame_idx
         sink.close(); runner.close()
     labels = getattr(runner, "_menu_labels", None)
