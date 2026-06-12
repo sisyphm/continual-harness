@@ -186,6 +186,9 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
         if goals is None:
             return "stuck"
         bx, by = x + 7, y + 7
+        if not (0 <= by < goals.shape[0] and 0 <= bx < goals.shape[1]):
+            _hold(runner, [], 30, phase)                      # transition window: the layout
+            continue                                          # rebased before the player coords
         if goals[by, bx]:
             return "arrived"
         walk = ((t.grid >> 10) & 3) == 0
