@@ -223,6 +223,14 @@ def scan_trainers(r: Rom) -> tuple[int, list[dict]]:
             a += max(run, 1) * 0x28
         else:
             a += 4
+    # gTrainers[0] is TRAINER_NONE (all zeros): _trainer_ok rejects it (partySize 0), so the
+    # detected run starts at entry 1 and run indices are OFF BY ONE vs script trainer ids.
+    # Pinned live: observed trainer-battle leads on 5 maps all matched manifest id == script
+    # id - 1 before this base correction. Detect rather than assume: a NULL-trainer entry one
+    # stride back (partySize 0, party ptr 0 — TRAINER_NONE's signature; its bytes are NOT all
+    # zero, the empty name carries an 0xFF terminator) means the real table starts there.
+    prev = best - 0x28
+    base_idx = 1 if r.u32(prev + 0x20) == 0 and r.u32(prev + 0x24) == 0 else 0
     trainers = []
     for i in range(best_len):
         a = best + i * 0x28
@@ -236,7 +244,7 @@ def scan_trainers(r: Rom) -> tuple[int, list[dict]]:
                 mons = []; break
             mons.append([sp, lvl])
         if mons:
-            trainers.append({"id": i, "class": r.u8(a + 1),
+            trainers.append({"id": i + base_idx, "class": r.u8(a + 1),
                              "name": decode(r.b[a + 4 - ROM_BASE:a + 16 - ROM_BASE]),
                              "party": mons})
     return best, trainers

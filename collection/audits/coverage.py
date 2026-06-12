@@ -180,8 +180,14 @@ def main():
                               "ok": sp_enemy.get(s, 0) >= FLOOR["species_enemy"]} for s in wild_sp]
     rows["species_player"] = [{"key": f"sp{s}", "support": sp_player.get(s, 0),
                                "ok": sp_player.get(s, 0) >= FLOOR["species_player"]} for s in party_sp]
-    # trainers: enemy (species, level) frames matched against enumerated party leads
-    trainer_ids = sorted({o["trainer_id"] for k in scope if k in maps
+    # trainers: enemy (species, level) frames matched against enumerated party leads.
+    # ACCESS-AWARE (same gating as species): Route 115 (0,30) and Route 103's east bank (0,18)
+    # hold ALL their trainers behind Surf — the hunt collector BFS-proves each one unreachable
+    # (instant clean-grid dead-ends from the pre-badge entrances). Petalburg Gym (8,1)'s seven
+    # trainers are FLAG-GATED absent pre-badge (live ObjectEvent table holds only local_id 1;
+    # trainer objects 2-8 never spawn before badge 5). All out of the pre-badge space.
+    gated_trainer_maps = {"0,30", "0,18", "8,1"}
+    trainer_ids = sorted({o["trainer_id"] for k in scope if k in maps and k not in gated_trainer_maps
                           for o in maps[k]["objects"] if o.get("trainer_id")})
     lead = {t["id"]: tuple(t["party"][0]) for t in M["trainers"] if t["party"]}
     sl_frames = Counter()

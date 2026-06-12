@@ -333,18 +333,33 @@ def _seek_start_slot(runner, slot: int, phase: str) -> bool:
     return False
 
 
+def _dots_box_open(runner) -> bool:
+    """The fishing dots box: a BOTTOM-band window with NOTHING above it. Menus, the trainer
+    card and other full screens also paint rows 0-13 — `_dialog_open` alone false-positives on
+    them (a mis-seeked START menu once 'confirmed' a cast that never happened)."""
+    from collection.extractors.ram import GBAState
+    from collection.extractors.ui import window_mask
+    wm = window_mask(GBAState.snapshot(runner.env))
+    return bool(wm[14:20].any()) and not bool(wm[:13].any())
+
+
 def _cast_rod(runner) -> bool:
     """One Old Rod cast via the overworld bag; True when the cast visibly started (the fishing
-    dots box opens). The START-menu cursor seeks BAG by RAM feedback (wrap-proof); the bag
-    REMEMBERS its pocket across opens (the ball-thrower lesson), so the KEY-ITEMS pocket offset
-    self-aligns on dots-box feedback. The fishing UI bypasses the text printers entirely, so the
-    window mask is the only cast signal."""
-    from collection.navigator import _dialog_open
+    dots box opens). The START-menu cursor seeks the bag slot by RAM feedback (wrap-proof); the
+    slot is DETECTED once per runner — slot 6 exists only in the 7-entry post-Pokédex menu
+    (pre-Pokédex BAG=1, post BAG=2; rotating it on failure would interfere with the pocket
+    rotation below). The bag REMEMBERS its pocket across opens (the ball-thrower lesson), so the
+    KEY-ITEMS pocket offset self-aligns on dots-box feedback. The fishing UI bypasses the text
+    printers entirely, so the window mask is the only cast signal."""
     def press(b, wait=35):
         _hold(runner, [b], 4, "fish"); _hold(runner, [], wait, "fish")
     lefts = getattr(runner, "_bag_lefts", 1)                  # 1 on first open (bag starts ITEMS)
+    bag_slot = getattr(runner, "_bag_slot", None)
     press("START", 50)
-    if not _seek_start_slot(runner, SLOT_BAG, "fish"):
+    if bag_slot is None:                                      # detect ONCE: slot 6 exists only
+        bag_slot = SLOT_BAG if _seek_start_slot(runner, 6, "fish") else 1   # post-Pokédex
+        runner._bag_slot = bag_slot
+    if not _seek_start_slot(runner, bag_slot, "fish"):
         for _ in range(3):
             press("B", 20)
         return False
@@ -354,7 +369,7 @@ def _cast_rod(runner) -> bool:
     press("A", 40); press("A", 50)                            # OLD ROD -> USE
     for _ in range(10):
         _hold(runner, [], 10, "fish")
-        if _dialog_open(runner):                              # the dots box: cast confirmed
+        if _dots_box_open(runner):                            # the dots box: cast confirmed
             runner._bag_lefts = 0
             return True
     runner._bag_lefts = (lefts + 1) % 5                       # mis-aligned pocket: rotate
@@ -572,10 +587,19 @@ def job_menus_labeled(runner, rng: random.Random, budget: int):
     (labels.jsonl: {label, start, end} frame ranges) — turns the menus axis from a geometry
     proxy into measurable per-screen coverage."""
     labels = []
+    runner.perform_action("START", speed="normal", record_end_state=False)
+    _hold(runner, [], 30, "menus")
+    seven = _seek_start_slot(runner, 6, "menus")              # slot 6 exists only post-Pokédex
+    for _ in range(3):                                        # (6-entry menus shift BAG to 1)
+        _hold(runner, ["B"], 4, "menus"); _hold(runner, [], 18, "menus")
     while runner.frame_idx < budget:
         for label, slot, presses, dwell in MENU_SCRIPT:
             if runner.frame_idx >= budget:
                 break
+            if not seven:
+                if label == "pokedex":
+                    continue                                  # no Pokédex entry yet
+                slot = max(0, slot - 1) if slot >= 1 else slot
             runner.perform_action("START", speed="normal", record_end_state=False)
             _hold(runner, [], 30, "menus")
             if not _seek_start_slot(runner, slot, "menus"):   # RAM-feedback anchor (wrap-proof)
