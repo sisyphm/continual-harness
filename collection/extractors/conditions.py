@@ -73,7 +73,10 @@ class RunConditionWriter:
         r["win"] = np.packbits(wm)
 
         p = player_state(st)
-        r["player_xy"] = (p["x"], p["y"])
+        # clamp to the s16 storage range: mid-warp/transition frames can read GARBAGE coords from
+        # the relocating saveblock (e.g. 0xFFFF — observed live, 2026-06-12; never present in the
+        # recorded corpus, so training is untouched). numpy 2 raises on out-of-range ints.
+        r["player_xy"] = (min(p["x"], 32767), min(p["y"], 32767))
         r["player_facing"] = _FACING_ID.get(p["facing"], 255)
         r["player_moving"] = _DIR_ID.get(p["moving_dir"], 0)
 
@@ -91,7 +94,8 @@ class RunConditionWriter:
             exy[s] = (e.x, e.y); esc[s] = (e.screen_x, e.screen_y)
             if e.is_player:
                 pscreen = (e.screen_x, e.screen_y)
-        r["player_screen"] = pscreen
+        r["player_screen"] = (max(-32768, min(pscreen[0], 32767)),       # same s16 guard: anchors
+                              max(-32768, min(pscreen[1], 32767)))       # are unbounded arithmetic
         r["ent"] = (ev, eg, el, ef, em, et, exy, esc)
 
         t = terrain(st)
