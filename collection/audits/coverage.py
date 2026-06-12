@@ -270,7 +270,7 @@ def main():
     gated_trainer_maps = {"0,30", "0,18", "8,1"}
     trainer_ids = sorted({o["trainer_id"] for k in scope if k in maps and k not in gated_trainer_maps
                           for o in maps[k]["objects"] if o.get("trainer_id")})
-    lead = {t["id"]: tuple(t["party"][0]) for t in M["trainers"] if t["party"]}
+    party = {t["id"]: [tuple(p) for p in t["party"]] for t in M["trainers"] if t["party"]}
     sl_frames = Counter()
     for f in sorted((root / "processed/conditions").glob("*.npz")):
         z = np.load(f)
@@ -279,8 +279,12 @@ def main():
         for (s_, l_), c_ in zip(*[list(x) for x in np.unique(
                 np.stack([bs[:, 1][m1], bl[:, 1][m1]], 1), axis=0, return_counts=True)] if m1.any() else ([], [])):
             sl_frames[(int(s_), int(l_))] += int(c_)
-    rows["trainers"] = [{"key": f"tr{t}", "support": sl_frames.get(lead.get(t, (0, 0)), 0),
-                         "ok": sl_frames.get(lead.get(t, (0, 0)), 0) >= 500} for t in trainer_ids]
+    # support = the best-covered PARTY MEMBER (species, level): lead-only matching marked
+    # recorded battles red whenever the lead fell fast and most frames showed the second mon
+    rows["trainers"] = [
+        {"key": f"tr{t}",
+         "support": (sup := max((sl_frames.get(p, 0) for p in party.get(t, [])), default=0)),
+         "ok": sup >= 500} for t in trainer_ids]
 
     # menus: labeled frames from the crawler's sidecars (labels.jsonl per run)
     label_frames = Counter()

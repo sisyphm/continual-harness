@@ -64,7 +64,8 @@ def main():
     root = Path(args.data_root)
     cache_dir = root / "processed/audit/outcomes"
     runs = discover_runs(root)
-    jobs = [(f"{k}__{n}", str(d), str(cache_dir / f"{k}__{n}.json")) for n, d, k in runs]
+    jobs = [(f"{k}__{n}", str(d), str(cache_dir / f"{k}__{n}.json")) for n, d, k in runs
+            if (Path(d) / "ppu_state.bin.idx.json").exists()]   # skip in-flight collections
     catches = evolutions = 0
     per_run = {}
     with Pool(args.workers) as pool:

@@ -461,6 +461,7 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
     import numpy as np
     mk = MapKnowledge()
     fought: set = set()
+    attempts: dict = {}
     while runner.frame_idx < budget:
         if _in_battle(runner):
             _battle_one(runner, rng, "fight")
@@ -475,9 +476,14 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
                 _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "trainer_nav")
             continue
         # the live ObjectEvent table only holds CAMERA-NEAR NPCs: target the ROM template
-        # coords, refined by the live record once the trainer is loaded (they wander)
+        # coords, refined by the live record once the trainer is loaded (they wander). The
+        # table also holds CONNECTED maps' NPCs whose local_ids COLLIDE — a Route 116 hunt once
+        # targeted (25,37) on a 100x20 map — so a live match must sit near its template.
         live = {e.local_id: e for e in npcs(GBAState.snapshot(runner.env)) if abs(e.x) < 200}
-        targets = [(o, live.get(o["local_id"])) for o in mk.objects.get(key, [])
+
+        def near(o, e):
+            return e if e is not None and abs(e.x - o["x"]) + abs(e.y - o["y"]) <= 8 else None
+        targets = [(o, near(o, live.get(o["local_id"]))) for o in mk.objects.get(key, [])
                    if o.get("trainer_id") and o["local_id"] not in fought]
         if not targets:
             return                                            # every trainer here engaged
@@ -494,17 +500,22 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
                         m[gy, gx] = True
             return m & (((t_.grid >> 10) & 3) == 0)
 
+        attempts[o["local_id"]] = attempts.get(o["local_id"], 0) + 1
         r = goto(runner, mk, goal, budget=12000, phase="trainer_nav")
         if r == "battle":
             _battle_one(runner, rng, "fight")                 # LoS engagement; re-target after
             continue
         if r != "arrived":
-            fought.add(o["local_id"])                         # unreachable: don't loop on it
+            if attempts[o["local_id"]] >= 3:
+                fought.add(o["local_id"])                     # unreachable: don't loop on it
             continue
         t, x, y = _state(runner)
         now = {n.local_id: n for n in npcs(GBAState.snapshot(runner.env)) if abs(n.x) < 200}
-        le = now.get(o["local_id"])
+        le = near(o, now.get(o["local_id"]))
         tx, ty = (le.x, le.y) if le is not None else (tx0, ty0)
+        if abs(tx - x) + abs(ty - y) != 1:                    # a WANDERER drifted off while we
+            if attempts[o["local_id"]] < 4:                   # walked: re-target at the live
+                continue                                      # position before wasting the talk
         d = {(1, 0): "RIGHT", (-1, 0): "LEFT", (0, 1): "DOWN", (0, -1): "UP"}.get(
             (max(-1, min(1, tx - x)), max(-1, min(1, ty - y))), "UP")
         _tap_turn(runner, d)
