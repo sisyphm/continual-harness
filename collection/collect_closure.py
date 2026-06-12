@@ -51,6 +51,7 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="schedule at most N runs (pilot)")
     ap.add_argument("--wave", type=int, default=1, help="run-dir suffix wave (re-runs entries)")
     ap.add_argument("--frames", type=int, default=0, help="override frames per run (pilot)")
+    ap.add_argument("--only", default="", help="comma-separated name substrings to schedule")
     args = ap.parse_args()
     root = Path(args.data_root)
     bank = json.loads((root / "processed/state_bank/bank.json").read_text())
@@ -60,9 +61,14 @@ def main():
         out = root / "behaviors" / f"closure__{e['name']}__w{args.wave}_{i:02d}"
         if (out / "behavior_summary.json").exists():
             continue
+        if args.only and not any(sub in e["name"] for sub in args.only.split(",")):
+            continue
         frames = args.frames or FRAMES[e["intent"]]
         job = "battle_catch" if e["intent"] == "catch" else "battle"
-        todo.append((e["name"], e["state"], frames, str(out), args.rom, 1000 + i, job))
+        todo.append((e["name"], e["state"], frames, str(out), args.rom,
+                     1000 + i + 1000 * args.wave, job))    # wave-varied seeds: a walk that never
+                                                           # finds grass must not fail identically
+                                                           # in every wave (the wave-1/2 lesson)
     if args.limit:
         todo = todo[:args.limit]
     print(f"{len(todo)} closure runs to collect…")
