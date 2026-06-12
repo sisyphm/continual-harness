@@ -11,7 +11,11 @@ renderer — the diff localizes where they matter.
 from __future__ import annotations
 
 import numpy as np
-from mgba._pylib import ffi
+
+try:
+    from mgba._pylib import ffi
+except ImportError:                        # offline consumers (model-repo tests, blob-side audits)
+    ffi = None                             # need only the blob helpers; LIVE extraction needs mgba
 
 
 # ---- extraction -------------------------------------------------------------

@@ -58,6 +58,12 @@ class RunConditionWriter:
         return self._grid_hash[key]
 
     def add(self, st: GBAState) -> None:
+        self.rows.append(self.row(st))
+
+    def row(self, st: GBAState) -> dict:
+        """ONE frame's condition record — the single extraction code path. Offline precompute appends
+        these (`add`); the LIVE demo worker calls this per emulated frame and ships the row (plus any
+        newly-interned grid/text) to the model process, so live conditions can never skew."""
         r: dict = {}
         r["mode"] = mode(st)
         r["in_battle"] = int(in_battle(st))
@@ -119,7 +125,7 @@ class RunConditionWriter:
                 bhp[s], bmx[s], bst[s] = bt.hp, bt.max_hp, bt.status1
                 bmv[s] = bt.moves; bpp[s] = bt.pp
         r["bat"] = (bv, bs, blv, bhp, bmx, bst, bmv, bpp, btype, np.frombuffer(bcomm, np.uint8))
-        self.rows.append(r)
+        return r
 
     def _merge_streamed_texts(self) -> tuple[list[str], dict[int, tuple[int, int]]]:
         """Some UI paths STREAM text char-by-char, producing one table entry per typed prefix.

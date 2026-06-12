@@ -50,8 +50,19 @@ class GBAState:
 
     @classmethod
     def from_env(cls, env) -> "GBAState":
-        """Live backend over the harness `EmeraldEmulator` (uses its read_memory)."""
+        """Live backend over the harness `EmeraldEmulator` (uses its read_memory). NOTE:
+        `read_memory` maps only the RAM buses (ewram/iwram) — fine for entity/battle/text reads;
+        extractors that touch io/palette/vram/oam (ui, conditions) need `snapshot(env)` instead."""
         return cls(env=env)
+
+    @classmethod
+    def snapshot(cls, env) -> "GBAState":
+        """ONE frame's full state from a live emulator, as a blob — the byte-identical backend the
+        recorded corpus uses (`render_state.extract_full_ppu_state`, all six blocks), so a live
+        frame parses through exactly the recorded-data code path. Take one per emulated frame."""
+        from collection.render_state import extract_full_ppu_state
+        state = extract_full_ppu_state(env)
+        return cls(blob=b"".join(state[name] for name, _ in BLOCK_SIZES))
 
     # -- core reads -------------------------------------------------------------
     def bytes(self, addr: int, n: int) -> bytes:
