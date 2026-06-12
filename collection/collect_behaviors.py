@@ -244,10 +244,85 @@ def job_run(runner, rng: random.Random, budget: int):
             _battle_one(runner, rng, "run")
 
 
+def job_battle_nav(runner, rng: random.Random, budget: int, catchy: bool = False):
+    """Navigator-driven battle farming: WALK TO grass (BFS over live collision + ROM behaviors),
+    pace inside it until an encounter, resolve, repeat — replaces blind wandering, which failed
+    to find grass at all from some spawns (waves 1-3 lesson)."""
+    from collection.navigator import MapKnowledge, goto_grass, pace_grass
+    mk = MapKnowledge()
+    while runner.frame_idx < budget:
+        r = goto_grass(runner, mk, budget=6000)
+        if r == "arrived":
+            r = pace_grass(runner, mk, rng, budget=4000)
+        if not _in_battle(runner):
+            if r in ("stuck", "budget", "left"):              # fall back to a wander burst, retry
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "battle_hunt")
+            continue
+        rr = rng.random()
+        if catchy:
+            strategy = "catch" if rr < 0.7 else "fight"
+        else:
+            strategy = "fight" if rr < 0.6 else ("catch" if rr < 0.85 else "run")
+        _battle_one(runner, rng, strategy)
+
+
+def job_warp_cycle(runner, rng: random.Random, budget: int):
+    """Warp coverage: repeatedly cross doors/connections ON PURPOSE (manifest warp events +
+    navigator). Bouncing between maps cycles pairs in both directions; battles en route are fled.
+
+    Hazard policy: wireless-club counters (warp dst map group 25 — Union/Trade link rooms) are
+    MULTIPLAYER features, excluded by policy; maps containing them (Center 2Fs) are not entered —
+    their attendant's auto-greeting script can trap a run at the counter (found the hard way).
+    Unforeseen traps: a map that yields repeated 'stuck' gets blacklisted + an escape burst."""
+    from collection.navigator import MapKnowledge, _state, _unstick, goto_warp
+    mk = MapKnowledge()
+
+    def hazardous(map_key: str) -> bool:
+        return any(w["dst_map"].startswith("25,") for w in mk.warps.get(map_key, []))
+
+    blacklist: set[str] = set()
+    last = None
+    stuck_here = 0
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "run")
+        t, x, y = _state(runner)
+        if t is None:
+            _hold(runner, [], 30, "warp_cycle"); continue
+        key = f"{t.map_group},{t.map_num}"
+        warps = [w for w in mk.warps.get(key, [])
+                 if not w["dst_map"].startswith("25,")        # link rooms: policy-excluded
+                 and not hazardous(w["dst_map"])              # don't enter counter maps
+                 and w["dst_map"] not in blacklist]
+        if not warps:
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "warp_roam"); continue
+        cand = [w for w in warps if (w["x"], w["y"]) != last] or warps
+        w = rng.choice(cand)
+        r = goto_warp(runner, mk, w["x"], w["y"], budget=6000)
+        if r == "crossed":
+            last, stuck_here = None, 0                        # arrived on the far-side warp tile
+            _hold(runner, [], rng.randint(20, 60), "warp_cycle")
+        elif r == "battle":
+            continue
+        else:
+            last = (w["x"], w["y"])                           # unreachable warp: try another next
+            stuck_here += 1
+            if stuck_here >= 3:                               # trapped? escape + blacklist the map
+                blacklist.add(key)
+                _unstick(runner, "warp_cycle")
+                for _ in range(6):
+                    _hold(runner, [rng.choice(DIRS)], rng.randint(24, 48), "warp_escape")
+                stuck_here = 0
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 32), "warp_roam")
+
+
 import functools
 
 JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "battle_catch": functools.partial(job_battle, catchy=True),
+        "battle_nav": job_battle_nav,
+        "battle_nav_catch": functools.partial(job_battle_nav, catchy=True),
+        "warp_cycle": job_warp_cycle,
         "menus": job_menus, "dialogue": job_dialogue, "run": job_run}
 
 
