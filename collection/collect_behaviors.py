@@ -486,11 +486,12 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
         tx0, ty0 = (e.x, e.y) if e is not None else (o["x"], o["y"])
 
         def goal(t_, beh, tx=tx0, ty=ty0):
-            m = np.zeros(t_.grid.shape, bool)
-            for dx, dy in ND:
-                gx, gy = tx + dx + 7, ty + dy + 7
-                if 0 <= gy < m.shape[0] and 0 <= gx < m.shape[1]:
-                    m[gy, gx] = True
+            m = np.zeros(t_.grid.shape, bool)                 # adjacent cells (talk) PLUS the
+            for dx, dy in ND:                                 # 4-tile sight lines (a trainer
+                for r_ in (1, 2, 3, 4):                       # whose neighbors are unwalkable
+                    gx, gy = tx + dx * r_ + 7, ty + dy * r_ + 7   # still engages through gaze)
+                    if 0 <= gy < m.shape[0] and 0 <= gx < m.shape[1]:
+                        m[gy, gx] = True
             return m & (((t_.grid >> 10) & 3) == 0)
 
         r = goto(runner, mk, goal, budget=12000, phase="trainer_nav")

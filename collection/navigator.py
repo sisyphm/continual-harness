@@ -197,8 +197,10 @@ def _unstick(runner, phase: str = "nav") -> None:
     for b in ("B", "B", "B", "A", "A", "A", "B"):
         _hold(runner, [b], 3, phase)
         _hold(runner, [], 12, phase)
-    _clear_dialog(runner, phase)                              # the mash may have opened one
-    _hold(runner, [], 40, phase)                              # let scripted movement finish
+    _hold(runner, [], 25, phase)                              # a box the A-mash reopened (e.g.
+    _clear_dialog(runner, phase)                              # re-talking to an adjacent NPC)
+    _hold(runner, [], 40, phase)                              # renders ~20f late — wait, THEN
+                                                              # clear; let scripts finish
 
 
 def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = "nav",
@@ -250,9 +252,9 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
             misses = 0
         else:
             misses += 1
-            if misses == 1:
-                _unstick(runner, phase)                       # script lock? clear before blaming
-                continue                                      # the cell
+            if misses % 3 == 1:                               # script lock? clear before blaming
+                _unstick(runner, phase)                       # the cell (re-fires: an unstick
+                continue                                      # can itself reopen a dialog)
             blocked[(bx + step[0], by + step[1])] = runner.frame_idx   # NPC / ledge: route around
             if misses >= 8:
                 return "stuck"
