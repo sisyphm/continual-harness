@@ -434,8 +434,10 @@ def job_fish(runner, rng: random.Random, budget: int):
         for cast in range(8):
             if runner.frame_idx >= budget:
                 return
-            if not _cast_rod(runner):
-                continue
+            _hold(runner, [], rng.randint(1, 53), "fish")     # decorrelate the game RNG: the
+            if not _cast_rod(runner):                         # cast flow is input-deterministic
+                continue                                      # and frame-aligned runs hook the
+                                                              # SAME species sequence
             if _await_bite(runner):                           # 'Oh! A bite!' -> react NOW
                 _hold(runner, ["A"], 4, "fish"); _hold(runner, [], 30, "fish")
                 for _ in range(12):                           # 'on the hook!' -> battle
