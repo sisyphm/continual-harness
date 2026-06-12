@@ -185,21 +185,28 @@ class RomTables:
 # ---- the constructor -----------------------------------------------------------------------------
 
 class StateConstructor:
-    """Load a base savestate, edit party/bag in emulated RAM, validate, snapshot to the bank."""
+    """Load a base savestate, edit party/bag in emulated RAM, validate, snapshot to the bank.
+    One instance constructs MANY states: `load_base()` re-arms it (the bank builder loops it)."""
 
-    def __init__(self, rom_path: str, base_state: str):
+    def __init__(self, rom_path: str, base_state: str | None = None):
         from mgba._pylib import ffi
         from pokemon_env.emulator import EmeraldEmulator
         self.env = EmeraldEmulator(rom_path=rom_path)
         self.env.initialize()
-        self.env.load_state(base_state)
-        self.env.run_frame_with_buttons([])
         self.tables = RomTables(Path(rom_path).read_bytes())
         mem_core = self.env.core.memory.u8._core
         size = ffi.new("size_t *")
         ptr = ffi.cast("uint8_t *", mem_core.getMemoryBlock(mem_core, 0x2, size))
         self._ewram = ffi.buffer(ptr, size[0])               # LIVE view: writes hit emulated RAM
         self.report: dict = {"pins": {}, "edits": []}
+        if base_state:
+            self.load_base(base_state)
+
+    def load_base(self, base_state: str) -> None:
+        """Arm on a base savestate: load, settle, re-run every pin (each base re-proves the layout)."""
+        self.env.load_state(base_state)
+        self.env.run_frame_with_buttons([])
+        self.report = {"pins": {}, "edits": [], "base": str(base_state)}
         self._pin_everything()
 
     # -- raw access (reads via the fresh snapshot seam; writes via the live buffer)
@@ -240,7 +247,7 @@ class StateConstructor:
 
     # -- edits
     def set_party_slot(self, slot: int, species: int, level: int,
-                       moves: list[int] | None = None) -> None:
+                       moves: list[int] | None = None, near_levelup: bool = False) -> None:
         st = self._st()
         addr = G_PLAYER_PARTY + slot * 100
         mon = bytearray(st.bytes(addr, 100))
@@ -249,7 +256,10 @@ class StateConstructor:
         sub = dict(d["sub"])
         g = bytearray(sub["G"])
         struct.pack_into("<H", g, 0, species)
-        struct.pack_into("<I", g, 4, self.tables.exp_at(species, level))
+        exp = (max(self.tables.exp_at(species, min(level + 1, 100)) - 20,    # one fight away from
+                   self.tables.exp_at(species, level))                       # the level-up (evolve
+               if near_levelup else self.tables.exp_at(species, level))      # states) or bracket start
+        struct.pack_into("<I", g, 4, exp)
         sub["G"] = bytes(g)
         if moves:
             a = bytearray(sub["A"])
