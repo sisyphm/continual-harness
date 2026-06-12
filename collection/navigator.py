@@ -48,10 +48,12 @@ class MapKnowledge:
         self.ptrs = ts["tileset_ptrs"]
         self.maps = {k: tuple(v) for k, v in ts["maps"].items()}
         self.warps = {}
+        self.signs = {}
         mf = Path(manifest_json)
         if mf.exists():
             m = json.loads(mf.read_text())["maps"]
             self.warps = {k: v["warps"] for k, v in m.items()}
+            self.signs = {k: v["signs"] for k, v in m.items()}
         self._attr_cache: dict[int, np.ndarray] = {}
 
     def _attrs(self, tileset_id: int) -> np.ndarray:
@@ -217,6 +219,21 @@ def grass_goal(t: Terrain, beh: np.ndarray | None):
         return None
     walk = ((t.grid >> 10) & 3) == 0
     return (beh == GRASS) & walk
+
+
+WATER = {0x10, 0x11, 0x14, 0x15, 0x16, 0x17}          # pond/sea behavior bytes (bite-validated)
+
+
+def water_adjacent_goal(t: Terrain, beh: np.ndarray | None):
+    """Walkable land cells with a water 4-neighbour (where a rod can be cast)."""
+    if beh is None:
+        return None
+    walk = ((t.grid >> 10) & 3) == 0
+    water = np.isin(beh, list(WATER))
+    near = np.zeros_like(water)
+    near[1:, :] |= water[:-1, :]; near[:-1, :] |= water[1:, :]
+    near[:, 1:] |= water[:, :-1]; near[:, :-1] |= water[:, 1:]
+    return walk & near & ~water
 
 
 def goto_grass(runner, mk: MapKnowledge, budget: int = 8000) -> str:

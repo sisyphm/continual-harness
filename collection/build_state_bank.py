@@ -24,7 +24,7 @@ import argparse
 import json
 from pathlib import Path
 
-from collection.constructor import ITEM_POKE_BALL, StateConstructor, decrypt_box
+from collection.constructor import ITEM_OLD_ROD, ITEM_POKE_BALL, StateConstructor, decrypt_box
 from collection.extractors.ram import GBAState
 
 G_PLAYER_PARTY = 0x020244EC
@@ -85,6 +85,15 @@ def main():
     for b in grassy:
         targets.append({"name": f"catch_{b['name']}", "intent": "catch", "base": b,
                         "species": None, "level": 0, "near_levelup": False, "balls": 30})
+    fish_maps = {k for k, t in manifest["wild"].items() if "fish" in t}
+    fish_bases = {}
+    for b in bases:
+        if b["map"] in fish_maps and b["map"] not in fish_bases:
+            fish_bases[b["map"]] = b                       # one rod state per fishable map
+    for b in fish_bases.values():
+        targets.append({"name": f"fishing_{b['name']}", "intent": "fish", "base": b,
+                        "species": None, "level": 0, "near_levelup": False, "balls": 10,
+                        "rod": True})
     if args.limit:
         targets = targets[:args.limit]
 
@@ -98,6 +107,9 @@ def main():
             if t["species"] is not None:
                 con.set_party_slot(0, t["species"], t["level"], near_levelup=t["near_levelup"])
             con.give_item(ITEM_POKE_BALL, t["balls"], "balls")
+            if t.get("rod"):
+                con.give_item(ITEM_OLD_ROD, 1, "keyitems")
+                con.register_item(ITEM_OLD_ROD)
             con.finalize(out)
             print(f"  constructed: {t['name']}  (base {t['base']['name']})")
         index.append({**{k: v for k, v in t.items() if k != "base"},

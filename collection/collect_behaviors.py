@@ -316,6 +316,201 @@ def job_warp_cycle(runner, rng: random.Random, budget: int):
             _hold(runner, [rng.choice(DIRS)], rng.randint(16, 32), "warp_roam")
 
 
+def _cast_rod(runner) -> bool:
+    """One Old Rod cast via the overworld bag; True when the cast visibly started (the fishing
+    dots box opens). Anchors the START-menu cursor (UP×7 — no wrap), then BAG = DOWN×2; the bag
+    REMEMBERS its pocket across opens (the ball-thrower lesson), so the KEY-ITEMS pocket offset
+    self-aligns on dots-box feedback. The fishing UI bypasses the text printers entirely, so the
+    window mask is the only cast signal."""
+    from collection.navigator import _dialog_open
+    def press(b, wait=35):
+        _hold(runner, [b], 4, "fish"); _hold(runner, [], wait, "fish")
+    lefts = getattr(runner, "_bag_lefts", 1)                  # 1 on first open (bag starts ITEMS)
+    press("START", 50)
+    for _ in range(7):
+        press("UP", 10)
+    press("DOWN"); press("DOWN"); press("A", 70)              # BAG
+    for _ in range(lefts):
+        press("LEFT", 35)                                     # to KEY ITEMS
+    press("A", 40); press("A", 50)                            # OLD ROD -> USE
+    for _ in range(10):
+        _hold(runner, [], 10, "fish")
+        if _dialog_open(runner):                              # the dots box: cast confirmed
+            runner._bag_lefts = 0
+            return True
+    runner._bag_lefts = (lefts + 1) % 5                       # mis-aligned pocket: rotate
+    for _ in range(5):
+        press("B", 20)
+    return False
+
+
+def job_fish(runner, rng: random.Random, budget: int):
+    """Fishing: the ONLY pre-badge access to water/fish encounter tables (7 species, 0 frames
+    without this). Navigate to a castable shore cell, face the water, cast, hook on a timer
+    (the bite is invisible to the text extractor), resolve the battle, repeat."""
+    from collection.navigator import (DIRS as NDIRS, MapKnowledge, WATER, _state, _step,
+                                      _unstick, goto, water_adjacent_goal)
+    import numpy as np
+    mk = MapKnowledge()
+    while runner.frame_idx < budget:
+        r = goto(runner, mk, water_adjacent_goal, budget=8000, phase="fish_nav")
+        if r == "battle":
+            _battle_one(runner, rng, "fight" if rng.random() < 0.7 else "run")
+            continue
+        if r != "arrived":
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "fish_nav")
+            continue
+        t, x, y = _state(runner)
+        beh = mk.behaviors(t)
+        if beh is None:
+            continue
+        water = np.isin(beh, list(WATER))
+        for (dx, dy), d in NDIRS.items():
+            if water[y + 7 + dy, x + 7 + dx]:
+                _step(runner, d, max_frames=12)               # tap-face the water
+                break
+        for cast in range(8):
+            if runner.frame_idx >= budget:
+                return
+            if not _cast_rod(runner):
+                continue
+            _hold(runner, [], rng.randint(50, 160), "fish")   # the dots
+            for _ in range(20):                               # hook attempts
+                _hold(runner, ["A"], 4, "fish"); _hold(runner, [], 12, "fish")
+                if _in_battle(runner):
+                    break
+            _hold(runner, [], 240, "fish")                    # battle intro or back to field
+            if _in_battle(runner):
+                _battle_one(runner, rng, "fight" if rng.random() < 0.6 else "catch")
+            _unstick(runner, "fish")
+
+
+def job_dialogue_nav(runner, rng: random.Random, budget: int):
+    """Dialogue EXHAUSTION: walk to every NPC and sign on the map ON PURPOSE and talk/read,
+    advancing with varied styles (vs the old job's blind facing-and-pressing). NPCs are live
+    entity records (they wander — re-target on arrival); signs come from the ROM manifest."""
+    from collection.extractors.entities import npcs
+    from collection.extractors.ram import GBAState
+    from collection.navigator import DIRS as ND
+    from collection.navigator import MapKnowledge, _clear_dialog, _state, goto
+    import numpy as np
+    mk = MapKnowledge()
+    visited: set = set()
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "run")
+        t, x, y = _state(runner)
+        if t is None:
+            _hold(runner, [], 30, "dialog_nav"); continue
+        key = f"{t.map_group},{t.map_num}"
+        targets = [("npc", e.local_id, e.x, e.y) for e in npcs(GBAState.snapshot(runner.env))
+                   if ("npc", key, e.local_id) not in visited and abs(e.x) < 200]
+        targets += [("sign", (sg["x"], sg["y"]), sg["x"], sg["y"]) for sg in mk.signs.get(key, [])
+                    if ("sign", key, (sg["x"], sg["y"])) not in visited]
+        if not targets:
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dialog_roam"); continue
+        kind, ident, tx, ty = min(targets, key=lambda c: abs(c[2] - x) + abs(c[3] - y))
+
+        def goal(t_, beh, tx=tx, ty=ty):
+            m = np.zeros(t_.grid.shape, bool)
+            for dx, dy in ND:
+                gx, gy = tx + dx + 7, ty + dy + 7
+                if 0 <= gy < m.shape[0] and 0 <= gx < m.shape[1]:
+                    m[gy, gx] = True
+            return m & (((t_.grid >> 10) & 3) == 0)
+
+        r = goto(runner, mk, goal, budget=5000, phase="dialog_nav")
+        visited.add((kind, key, ident))                      # tried — don't loop on the unreachable
+        if r != "arrived":
+            continue
+        t, x, y = _state(runner)
+        d = {(1, 0): "RIGHT", (-1, 0): "LEFT", (0, 1): "DOWN", (0, -1): "UP"}.get(
+            (max(-1, min(1, tx - x)), max(-1, min(1, ty - y))), "UP")
+        _tap_turn(runner, d)
+        runner.perform_action("A", speed="normal", record_end_state=False)
+        _hold(runner, [], 25, "dialog_nav")
+        _advance_dialog(runner, rng, rng.choice(ADVANCE_STYLES))
+        _clear_dialog(runner, "dialog_nav")
+
+
+# the labeled-menu script: each section anchors the START cursor (UP x7, no wrap), opens one
+# entry, walks a couple of in-screen stages, then B-retreats to the field
+MENU_SCRIPT = (
+    ("start_menu",   0, (), 50),
+    ("pokedex",      0, ("A", "DOWN", "A", "RIGHT"), 70),
+    ("party",        1, ("A", "DOWN"), 70),
+    ("summary_info", 1, ("A", "A"), 80),
+    ("summary_skills", 1, ("A", "A", "RIGHT"), 80),
+    ("bag_items",    2, ("A",), 70),
+    ("bag_balls",    2, ("A", "RIGHT"), 70),
+    ("bag_tms",      2, ("A", "RIGHT", "RIGHT"), 70),
+    ("bag_keyitems", 2, ("A", "LEFT"), 70),
+    ("trainer_card", 3, ("A",), 90),
+    ("save_dialog",  4, ("A",), 80),
+    ("options",      5, ("A", "DOWN", "RIGHT"), 80),
+)
+
+
+def job_menus_labeled(runner, rng: random.Random, budget: int):
+    """The LABELED menu crawler: deterministic screen visits with a labels sidecar
+    (labels.jsonl: {label, start, end} frame ranges) — turns the menus axis from a geometry
+    proxy into measurable per-screen coverage."""
+    labels = []
+    while runner.frame_idx < budget:
+        for label, slot, presses, dwell in MENU_SCRIPT:
+            if runner.frame_idx >= budget:
+                break
+            runner.perform_action("START", speed="normal", record_end_state=False)
+            _hold(runner, [], 30, "menus")
+            for _ in range(7):
+                _hold(runner, ["UP"], 4, "menus"); _hold(runner, [], 10, "menus")
+            for _ in range(slot):
+                _hold(runner, ["DOWN"], 4, "menus"); _hold(runner, [], 12, "menus")
+            start = runner.frame_idx
+            for b in presses:
+                _hold(runner, [b], 4, "menus"); _hold(runner, [], 35, "menus")
+            _hold(runner, [], dwell, "menus")
+            labels.append({"label": label, "start": start, "end": runner.frame_idx})
+            for _ in range(8):                               # retreat to the field
+                _hold(runner, ["B"], 4, "menus"); _hold(runner, [], 18, "menus")
+        for _ in range(rng.randint(2, 5)):                   # roam between sweeps
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 32), "menu_roam")
+            if _in_battle(runner):
+                _battle_one(runner, rng, "run")
+    runner._menu_labels = labels                             # collect_behavior persists this
+
+
+def job_story(runner, rng: random.Random, budget: int):
+    """One-off scene replayer: a generic story-advancer for scripted sequences (intro + naming
+    screen + truck + Birch rescue). Dialog boxes advance with varied styles; choice menus get A
+    (first option — keeps gender=BOY policy) with occasional DOWN first (varies the preset NAME
+    pick); otherwise watch or wander gently. Seeded at start/truck states ×N = the one-off axis."""
+    from collection.navigator import _dialog_open
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "fight")
+            continue
+        if _dialog_open(runner):
+            style = rng.choice(ADVANCE_STYLES)
+            if style == "b_spam":
+                _hold(runner, ["B"], 3, "story"); _hold(runner, [], 10, "story")
+            elif style == "slow_a":
+                _hold(runner, [], rng.randint(20, 60), "story")
+                _hold(runner, ["A"], 3, "story"); _hold(runner, [], 10, "story")
+            else:
+                _hold(runner, ["A"], 3, "story"); _hold(runner, [], 12, "story")
+            continue
+        r = rng.random()
+        if r < 0.45:
+            _hold(runner, [], rng.randint(10, 40), "story")            # watch the cutscene
+        elif r < 0.75:
+            if rng.random() < 0.3:
+                _hold(runner, ["DOWN"], 4, "story"); _hold(runner, [], 12, "story")
+            _hold(runner, ["A"], 4, "story"); _hold(runner, [], 20, "story")
+        else:
+            _hold(runner, [rng.choice(DIRS)], rng.randint(8, 24), "story")
+
+
 import functools
 
 JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
@@ -323,6 +518,10 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "battle_nav": job_battle_nav,
         "battle_nav_catch": functools.partial(job_battle_nav, catchy=True),
         "warp_cycle": job_warp_cycle,
+        "fish": job_fish,
+        "dialogue_nav": job_dialogue_nav,
+        "menus_labeled": job_menus_labeled,
+        "story": job_story,
         "menus": job_menus, "dialogue": job_dialogue, "run": job_run}
 
 
@@ -341,6 +540,9 @@ def collect_behavior(*, job: str, load_state: str, output_dir: str, rom_path: st
         JOBS[job](runner, rng, frames)
         n = runner.frame_idx
         sink.close(); runner.close()
+    labels = getattr(runner, "_menu_labels", None)
+    if labels:
+        (out / "labels.jsonl").write_text("\n".join(json.dumps(l) for l in labels))
     summary = {"job": job, "frames": n, "seed": seed, "load_state": str(load_state)}
     (out / "behavior_summary.json").write_text(json.dumps(summary))
     return summary

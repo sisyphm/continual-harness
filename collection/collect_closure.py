@@ -29,7 +29,7 @@ from pathlib import Path
 
 from collection.collect_behaviors import collect_behavior
 
-FRAMES = {"battle": 9000, "evolve": 11000, "catch": 12000}
+FRAMES = {"battle": 9000, "evolve": 11000, "catch": 12000, "fish": 16000}
 
 
 def _one(args: tuple) -> str:
@@ -54,6 +54,7 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated name substrings to schedule")
     ap.add_argument("--nav", action="store_true", help="navigator-driven battle jobs (battle_nav)")
     ap.add_argument("--warps", type=int, default=0, help="also schedule N warp_cycle runs over bases")
+    ap.add_argument("--aux", action="store_true", help="schedule dialogue_nav/menus_labeled/story runs")
     args = ap.parse_args()
     root = Path(args.data_root)
     bank = json.loads((root / "processed/state_bank/bank.json").read_text())
@@ -66,7 +67,9 @@ def main():
         if args.only and not any(sub in e["name"] for sub in args.only.split(",")):
             continue
         frames = args.frames or FRAMES[e["intent"]]
-        if args.nav:
+        if e["intent"] == "fish":
+            job = "fish"
+        elif args.nav:
             job = "battle_nav_catch" if e["intent"] == "catch" else "battle_nav"
         else:
             job = "battle_catch" if e["intent"] == "catch" else "battle"
@@ -74,6 +77,19 @@ def main():
                      1000 + i + 1000 * args.wave, job))    # wave-varied seeds: a walk that never
                                                            # finds grass must not fail identically
                                                            # in every wave (the wave-1/2 lesson)
+    if args.aux:
+        towny = [b for b in bank["bases"] if not b["grassy"]][:10] or bank["bases"][:10]
+        for j, b in enumerate(towny):
+            for job, frames in (("dialogue_nav", 10000), ("menus_labeled", 9000)):
+                out = root / "behaviors" / f"closure__{job}_{b['name']}__w{args.wave}_{j:02d}"
+                if not (out / "behavior_summary.json").exists():
+                    todo.append((f"{job}_{b['name']}", b["state"], frames, str(out), args.rom,
+                                 8000 + j + 1000 * args.wave, job))
+        for j in range(6):                                  # intro/one-off replays, varied seeds
+            out = root / "behaviors" / f"closure__story_intro__w{args.wave}_{j:02d}"
+            if not (out / "behavior_summary.json").exists():
+                todo.append((f"story_{j}", "Emerald-GBAdvance/start.state", 30000, str(out),
+                             args.rom, 9000 + j + 1000 * args.wave, "story"))
     for j, b in enumerate(bank["bases"][:args.warps]):
         out = root / "behaviors" / f"closure__warpcycle_{b['name']}__w{args.wave}_{j:02d}"
         if not (out / "behavior_summary.json").exists():

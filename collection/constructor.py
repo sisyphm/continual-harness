@@ -42,6 +42,9 @@ SB2_ENCRYPTION_KEY = 0xAC              # u32 at SaveBlock2 + 0xAC (Emerald bag/m
 SB1_MONEY = 0x490
 POCKETS = {"items": (0x560, 30), "keyitems": (0x5D8, 30), "balls": (0x650, 16)}
 ITEM_POKE_BALL, MAX_ITEM_ID = 4, 376
+ITEM_OLD_ROD = 262
+SB1_REGISTERED_ITEM = 0x496            # u16, plain (not key-encrypted) — pinned by the fish test:
+                                       # SELECT must cast the rod in-game after construction
 N_SPECIES, MUDKIP = 412, 283           # corpus-pinned: player lead of the chain save is Mudkip
 
 # Gen-3 box substructure order: permutations of (Growth, Attacks, EVs, Misc) by personality % 24
@@ -277,6 +280,14 @@ class StateConstructor:
         self.report["edits"].append({"slot": slot, "species": species, "level": level,
                                      "moves": moves, "stats": stats})
 
+    def register_item(self, item_id: int) -> None:
+        """Bind a key item to SELECT (SaveBlock1.registeredItem) — one button replaces the whole
+        START→BAG→KEY ITEMS→USE navigation (load-bearing for the fishing job)."""
+        st = self._st()
+        import struct as _s
+        self._write_ewram(st.u32(SB1_PTR) + SB1_REGISTERED_ITEM, _s.pack("<H", item_id))
+        self.report["edits"].append({"registered_item": item_id})
+
     def give_item(self, item_id: int, qty: int, pocket: str = "balls") -> None:
         st = self._st()
         key16 = self._key() & 0xFFFF
@@ -304,6 +315,9 @@ class StateConstructor:
                 # flags byte: bit0 = isBadEgg (must be clear), bit1 = hasSpecies (must be set)
                 assert not (d["flags"] & 0x01), "game flagged the mon as a BAD EGG"
                 assert d["flags"] & 0x02, "hasSpecies flag lost"
+                e["verified"] = True
+            elif "registered_item" in e:
+                assert st.u16(st.u32(SB1_PTR) + SB1_REGISTERED_ITEM) == e["registered_item"]
                 e["verified"] = True
             else:
                 key16 = self._key() & 0xFFFF
