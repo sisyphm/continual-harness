@@ -39,6 +39,59 @@ def camera_topleft(px, py, mw, mh):
             min(max(py - 5, 0), max(0, mh - SCREEN_MH)))
 
 
+def reachable_window_metatiles(grid: np.ndarray, beh: np.ndarray | None,
+                               seeds: set[tuple[int, int]]) -> set[int]:
+    """Metatiles visible from any REACHABLE standing cell: elevation+ledge BFS (the navigator's
+    movement model) from every observed player position, then each reachable cell contributes
+    its camera window. This is the access-aware terrain UNIVERSE — metatiles that exist only in
+    Surf-gated map regions can never be on a pre-badge screen and must not be red forever."""
+    from collections import deque
+    from collection.navigator import _JUMP
+    h, w = grid.shape
+    mh, mw = h - 14, w - 15
+    walk = ((grid >> 10) & 3) == 0
+    elev = (grid >> 12) & 0xF
+    seen3 = set()
+    reach = np.zeros((h, w), bool)
+    q = deque()
+    for px, py in seeds:
+        bx, by = px + 7, py + 7
+        if 0 <= by < h and 0 <= bx < w:
+            s3 = (bx, by, int(elev[by, bx]))
+            if s3 not in seen3:
+                seen3.add(s3)
+                reach[by, bx] = True
+                q.append(s3)
+    while q:
+        x, y, e = q.popleft()
+        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < w and 0 <= ny < h):
+                continue
+            if walk[ny, nx]:
+                te = int(elev[ny, nx])
+                if te not in (0, 15) and e not in (0, 15) and te != e:
+                    continue
+                n3 = (nx, ny, e if te == 15 else te)
+            elif beh is not None and _JUMP.get(int(beh[ny, nx])) == (dx, dy):
+                lx, ly = x + 2 * dx, y + 2 * dy
+                if not (0 <= lx < w and 0 <= ly < h) or not walk[ly, lx]:
+                    continue
+                n3 = (lx, ly, int(elev[ly, lx]))
+            else:
+                continue
+            if n3 not in seen3:
+                seen3.add(n3)
+                reach[n3[1], n3[0]] = True
+                q.append(n3)
+    mts: set[int] = set()
+    for by, bx in zip(*np.nonzero(reach)):
+        cx, cy = camera_topleft(int(bx) - 7, int(by) - 7, mw, mh)
+        win = grid[cy + 7:cy + 7 + SCREEN_MH, cx + 7:cx + 7 + SCREEN_MW] & 0x3FF
+        mts.update(int(v) for v in np.unique(win))
+    return mts
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", default="../pokemon-worldmodel/data")
@@ -56,6 +109,8 @@ def main():
     outcomes = Counter()
     glyphs = Counter()
     win_patterns = Counter()
+    reach_grids: dict = {}                                    # map key -> one full grid
+    reach_seeds: dict = {}                                    # map key -> observed player (x,y)
 
     for f in sorted((root / "processed/conditions").glob("*.npz")):
         z = np.load(f)
@@ -86,6 +141,9 @@ def main():
             for loc in np.unique(win):
                 t = ts[0] if loc < 512 else ts[1]
                 terrain[(t, int(loc) if loc < 512 else int(loc) - 512)] += int(cnt)
+            if key not in reach_grids:
+                reach_grids[key] = grid.copy()
+            reach_seeds.setdefault(key, set()).add((int(pxy[i, 0]), int(pxy[i, 1])))
 
         # --- warps: transition instances (reset±1 excluded)
         prev = None
@@ -148,9 +206,25 @@ def main():
     maps = M["maps"]
     rows: dict[str, list] = {}
 
-    # terrain universe = every metatile present in the corpus map grids (the grid IS the full map)
-    rows["terrain"] = [{"key": f"ts{t}/mt{m_}", "support": c, "ok": c >= FLOOR["terrain"]}
-                       for (t, m_), c in sorted(terrain.items())]
+    # terrain universe = metatiles VISIBLE FROM REACHABLE cells (access-aware: elevation+ledge
+    # BFS from observed player positions, dilated by the camera window — see
+    # reachable_window_metatiles). Anything actually seen on screen joins defensively.
+    from types import SimpleNamespace
+    from collection.navigator import MapKnowledge
+    mk = MapKnowledge(manifest_json=str(root / "processed/coverage_manifest.json"))
+    universe: set = set()
+    for key, grid in reach_grids.items():
+        ts = tilesets.get(key)
+        if ts is None:
+            continue
+        g_, n_ = (int(v) for v in key.split(","))
+        beh = mk.behaviors(SimpleNamespace(map_group=g_, map_num=n_, grid=grid))
+        for loc in reachable_window_metatiles(grid, beh, reach_seeds[key]):
+            universe.add((ts[0], loc) if loc < 512 else (ts[1], loc - 512))
+    universe |= set(terrain)                                  # seen-on-screen is in by definition
+    rows["terrain"] = [{"key": f"ts{t}/mt{m_}", "support": terrain.get((t, m_), 0),
+                        "ok": terrain.get((t, m_), 0) >= FLOOR["terrain"]}
+                       for (t, m_) in sorted(universe)]
     # warps: manifest pairs in scope, per direction
     wrows = []
     for a in scope:
@@ -161,7 +235,14 @@ def main():
             c = warp_n.get((a, b), 0)
             wrows.append({"key": f"{a}->{b}", "support": c, "ok": c >= FLOOR["warp_traversals"]})
     rows["warps"] = wrows
-    enum_gfx = sorted({o["gfx"] for k in scope if k in maps for o in maps[k]["objects"]})
+    # entity-gfx universe, ACCESS-AWARE: ids 240-255 are OBJ_EVENT_GFX_VAR_* slots (resolved at
+    # runtime from VARs — the live sprite is counted under its REAL id, so the placeholder rows
+    # can never match). gfx whose only in-scope placements sit in Surf-gated areas (Route 103's
+    # east bank trainers @ (67,9)/(36,6)/(36,13); Route 115 beyond the elevation wall @ (10,15)/
+    # (29,50)) are out with their maps' gating.
+    gated_gfx = {42, 43, 66, 52, 86}
+    enum_gfx = sorted({o["gfx"] for k in scope if k in maps for o in maps[k]["objects"]
+                       if o["gfx"] < 240} - gated_gfx)
     rows["entities"] = [{"key": f"gfx{g}", "support": gfx_frames.get(g, 0),
                          "ok": gfx_frames.get(g, 0) >= FLOOR["entity_gfx"]} for g in enum_gfx]
     # enemy-species universe, ACCESS-AWARE (policy, 2026-06): 'water'/'rock' tables need Surf /

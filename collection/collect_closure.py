@@ -106,8 +106,10 @@ def main():
         by_map.setdefault(b["map"], b)
     far_base = next((b for b in bank["bases"] if "RUSTBORO" in b["name"]), bank["bases"][-1])
     if args.trainer_maps:
+        by_name = {b["name"]: b for b in bank["bases"]}
         for j, tm in enumerate(args.trainer_maps.split(";")):
-            base = by_map.get(tm, far_base)
+            tm, _, bname = tm.partition("@")                  # 'g,n@BASE_NAME' pins the seed
+            base = by_name.get(bname) or by_map.get(tm, far_base)
             out = root / "behaviors" / f"closure__trainers_{tm.replace(',', '-')}__w{args.wave}_{j:02d}"
             if not (out / "behavior_summary.json").exists():
                 todo.append((f"trainers_{tm}", base["state"], args.frames or 45000,

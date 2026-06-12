@@ -384,12 +384,15 @@ def _await_bite(runner, polls: int = 160) -> bool:
     ending messages) repaint the whole line — 289+ px, measured live. Pressing A during the
     dots CANCELS the cast ('not even a nibble'), so we must not touch A until this fires; the
     bite window is only ~30 frames, hence the tight 6-frame screenshot poll. The dialog-open
-    check (a full snapshot) runs SPARSELY — tight snapshot polling core-dumps mgba."""
+    check (a full snapshot) runs SPARSELY — tight snapshot polling core-dumps mgba.
+    The region is the box INTERIOR — measuring out to the border catches columns of ANIMATED
+    WATER beside it (53-161 px deltas, measured on Route 103), which fired the threshold and
+    cancelled every cast on watery shores."""
     import numpy as np
     from collection.navigator import _dialog_open
 
-    def box():                                                # textbox interior (rows 14-19)
-        return np.asarray(runner.screenshot())[112:160, 8:232].astype(np.int16)
+    def box():                                                # textbox INTERIOR (rows 14-19)
+        return np.asarray(runner.screenshot())[116:156, 24:216].astype(np.int16)
     prev = box()
     for i in range(polls):
         _hold(runner, [], 6, "fish")
