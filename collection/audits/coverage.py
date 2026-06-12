@@ -173,9 +173,14 @@ def main():
     charset = json.loads((root / "processed/conditions/charset.json").read_text())["charset"]
     rows["glyphs"] = [{"key": repr(ch), "support": glyphs.get(ch, 0),
                        "ok": glyphs.get(ch, 0) >= FLOOR["glyph"]} for ch in sorted(set(charset.values()))]
+    oc = root / "processed/audit/outcomes_report.json"               # audits.outcomes (party
+    measured = json.loads(oc.read_text()) if oc.exists() else {}     # walk; conditions can't see it)
     rows["outcomes"] = [{"key": k, "support": int(v), "ok": v >= FLOOR["outcome_events"]}
                         for k, v in sorted(outcomes.items())] + \
-                       [{"key": k, "support": 0, "ok": False} for k in ("catch", "evolution")]
+                       [{"key": "catch", "support": measured.get("catches", 0),
+                         "ok": measured.get("catches", 0) >= FLOOR["outcome_events"]},
+                        {"key": "evolution", "support": measured.get("evolutions", 0),
+                         "ok": measured.get("evolutions", 0) >= 3}]
 
     report = {"floors": FLOOR,
               "summary": {ax: {"rows": len(rs), "red": sum(not r["ok"] for r in rs)}
