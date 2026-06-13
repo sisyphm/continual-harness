@@ -279,8 +279,13 @@ def main():
     # trainers are FLAG-GATED absent pre-badge (live ObjectEvent table holds only local_id 1;
     # trainer objects 2-8 never spawn before badge 5). All out of the pre-badge space.
     gated_trainer_maps = {"0,30", "0,18", "8,1"}
+    # tr273 JERRY / tr605 JANICE (Route 116): live-verified ABSENT — standing adjacent to their
+    # template cells, the ObjectEvent table holds the map's other NPCs but not locals 16/18
+    # (they spawn after a later story flag). Every reachable 116 trainer battles fine.
+    gated_trainer_ids = {273, 605}
     trainer_ids = sorted({o["trainer_id"] for k in scope if k in maps and k not in gated_trainer_maps
-                          for o in maps[k]["objects"] if o.get("trainer_id")})
+                          for o in maps[k]["objects"]
+                          if o.get("trainer_id") and o["trainer_id"] not in gated_trainer_ids})
     party = {t["id"]: [tuple(p) for p in t["party"]] for t in M["trainers"] if t["party"]}
     sl_frames = Counter()
     for f in sorted((root / "processed/conditions").glob("*.npz")):
