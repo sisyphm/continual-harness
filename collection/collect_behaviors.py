@@ -450,7 +450,8 @@ def job_fish(runner, rng: random.Random, budget: int):
             _unstick(runner, "fish")
 
 
-def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = ""):
+def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = "",
+                     only_ids: list | None = None):
     """Trainer ENGAGEMENT: walk to every trainer NPC on the target map and start the fight
     (talk-initiated; a line-of-sight engagement en route reaches the same battle). Trainer ids
     come from the ROM manifest's object scripts (opcode 0x5C); savestate runs reset the
@@ -486,7 +487,8 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
         def near(o, e):
             return e if e is not None and abs(e.x - o["x"]) + abs(e.y - o["y"]) <= 8 else None
         targets = [(o, near(o, live.get(o["local_id"]))) for o in mk.objects.get(key, [])
-                   if o.get("trainer_id") and o["local_id"] not in fought]
+                   if o.get("trainer_id") and o["local_id"] not in fought
+                   and (not only_ids or o["trainer_id"] in only_ids)]
         if not targets:
             return                                            # every trainer here engaged
         pos = lambda c: (c[1].x, c[1].y) if c[1] is not None else (c[0]["x"], c[0]["y"])
@@ -533,14 +535,15 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
         _clear_dialog(runner, "trainer_nav")
 
 
-def job_dialogue_nav(runner, rng: random.Random, budget: int):
+def job_dialogue_nav(runner, rng: random.Random, budget: int, target_map: str = ""):
     """Dialogue EXHAUSTION: walk to every NPC and sign on the map ON PURPOSE and talk/read,
     advancing with varied styles (vs the old job's blind facing-and-pressing). NPCs are live
-    entity records (they wander — re-target on arrival); signs come from the ROM manifest."""
+    entity records (they wander — re-target on arrival); signs come from the ROM manifest.
+    With target_map, goto_map there first (dwell-starved interiors like Oldale's upstairs)."""
     from collection.extractors.entities import npcs
     from collection.extractors.ram import GBAState
     from collection.navigator import DIRS as ND
-    from collection.navigator import MapKnowledge, _clear_dialog, _state, goto
+    from collection.navigator import MapKnowledge, _clear_dialog, _state, goto, goto_map
     import numpy as np
     mk = MapKnowledge()
     visited: set = set()
@@ -551,6 +554,10 @@ def job_dialogue_nav(runner, rng: random.Random, budget: int):
         if t is None:
             _hold(runner, [], 30, "dialog_nav"); continue
         key = f"{t.map_group},{t.map_num}"
+        if target_map and key != target_map:
+            if goto_map(runner, mk, target_map) not in ("arrived", "battle"):
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dialog_nav")
+            continue
         targets = [("npc", e.local_id, e.x, e.y) for e in npcs(GBAState.snapshot(runner.env))
                    if ("npc", key, e.local_id) not in visited and abs(e.x) < 200]
         targets += [("sign", (sg["x"], sg["y"]), sg["x"], sg["y"]) for sg in mk.signs.get(key, [])

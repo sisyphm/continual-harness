@@ -145,18 +145,27 @@ def main():
                 reach_grids[key] = grid.copy()
             reach_seeds.setdefault(key, set()).add((int(pxy[i, 0]), int(pxy[i, 1])))
 
-        # --- warps: transition instances (reset±1 excluded)
+        # --- warps: transition instances (reset±1 excluded); INTRA-map warps (e.g. the gym's
+        # 8,1->8,1 chamber doors) never change the map id — detect them as same-map teleports
+        # (player jumps >3 tiles in one frame)
         prev = None
+        prev_xy = None
         for i in range(n):
             if i in resets or (i - 1) in resets:
                 prev = None
+                prev_xy = None
             a, b = int(mid[i, 0]), int(mid[i, 1])
             if (a, b) == (255, 255):
                 continue
             k = f"{a},{b}"
+            xy = (int(pxy[i, 0]), int(pxy[i, 1]))
             if prev is not None and prev != k:
                 warp_n[(prev, k)] += 1
+            elif (prev == k and prev_xy is not None
+                  and abs(xy[0] - prev_xy[0]) + abs(xy[1] - prev_xy[1]) > 3):
+                warp_n[(k, k)] += 1
             prev = k
+            prev_xy = xy
 
         # --- entities (battle frames excluded, as the model sees them)
         ev = (z["ent_valid"] > 0) & (z["in_battle"][:, None] == 0)
@@ -239,8 +248,10 @@ def main():
     # runtime from VARs — the live sprite is counted under its REAL id, so the placeholder rows
     # can never match). gfx whose only in-scope placements sit in Surf-gated areas (Route 103's
     # east bank trainers @ (67,9)/(36,6)/(36,13); Route 115 beyond the elevation wall @ (10,15)/
-    # (29,50)) are out with their maps' gating.
-    gated_gfx = {42, 43, 66, 52, 86}
+    # (29,50)) are out with their maps' gating. FLAG-GATED-ABSENT pre-badge, live-verified
+    # (object in manifest, live table empty at the spot): 211 (Briney's cottage pair — he moves
+    # in after the post-badge Peeko rescue) and 223 (an unbought house decoration on 2,3).
+    gated_gfx = {42, 43, 66, 52, 86, 211, 223}
     enum_gfx = sorted({o["gfx"] for k in scope if k in maps for o in maps[k]["objects"]
                        if o["gfx"] < 240} - gated_gfx)
     rows["entities"] = [{"key": f"gfx{g}", "support": gfx_frames.get(g, 0),
