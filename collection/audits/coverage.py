@@ -84,12 +84,20 @@ def reachable_window_metatiles(grid: np.ndarray, beh: np.ndarray | None,
                 seen3.add(n3)
                 reach[n3[1], n3[0]] = True
                 q.append(n3)
-    mts: set[int] = set()
+    # A metatile counts only if it sits at an INTERIOR cell (7 <= r < 7+mh, 7 <= c < 7+mw) that
+    # falls in some reachable cell's camera window. The 7-tile border padding holds STALE
+    # gBackupMapLayout from the previously-loaded map (the buffer isn't cleared on map change) —
+    # reading it invented ~130 phantom metatiles per interior (verified on the Rustboro Gym:
+    # 82k frames inside, yet 141 "red" of which only 11 were real room tiles). Restrict to the
+    # de-bordered interior so the universe = terrain the clamped live camera can actually show.
+    on_screen = np.zeros((h, w), bool)
     for by, bx in zip(*np.nonzero(reach)):
         cx, cy = camera_topleft(int(bx) - 7, int(by) - 7, mw, mh)
-        win = grid[cy + 7:cy + 7 + SCREEN_MH, cx + 7:cx + 7 + SCREEN_MW] & 0x3FF
-        mts.update(int(v) for v in np.unique(win))
-    return mts
+        on_screen[cy + 7:cy + 7 + SCREEN_MH, cx + 7:cx + 7 + SCREEN_MW] = True
+    interior = np.zeros((h, w), bool)
+    interior[7:7 + mh, 7:7 + mw] = True
+    vis = grid[on_screen & interior] & 0x3FF
+    return {int(v) for v in np.unique(vis)}
 
 
 def main():
@@ -141,7 +149,14 @@ def main():
             for loc in np.unique(win):
                 t = ts[0] if loc < 512 else ts[1]
                 terrain[(t, int(loc) if loc < 512 else int(loc) - 512)] += int(cnt)
-            if key not in reach_grids:
+            # store ONE grid per map for the universe — but ONLY a frame whose de-bordered dims
+            # match the manifest. Warps flip MAP_BANK/NUMBER a few frames before gBackupMapLayout
+            # rebuilds, so a transition frame carries the PREVIOUS map's (wrong-size) layout under
+            # the new map id; read through the new tileset it invents phantom metatiles (the
+            # Rustboro Gym got a 40x60 outdoor grid → 229 foreign tiles vs its real 60).
+            mfm = M["maps"].get(key)
+            if key not in reach_grids and mfm and \
+                    grid.shape[1] - 15 == mfm["width"] and grid.shape[0] - 14 == mfm["height"]:
                 reach_grids[key] = grid.copy()
             reach_seeds.setdefault(key, set()).add((int(pxy[i, 0]), int(pxy[i, 1])))
 
