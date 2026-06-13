@@ -535,6 +535,149 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
         _clear_dialog(runner, "trainer_nav")
 
 
+def job_intro(runner, rng: random.Random, budget: int):
+    """Deterministic INTRO walkthrough from start.state: truck -> Littleroot (mom's escort) ->
+    house ground floor (moving-day Vigoroth) -> upstairs (clock scene; the room-decoration
+    sprites live only here during the intro) -> back down -> outside -> May's house + room.
+    Generic story replay never gets upstairs (random wander vs a 1-tile stair) — this walks
+    the warps ON PURPOSE with the navigator and A-advances every scripted box en route."""
+    from collection.navigator import (MapKnowledge, _clear_dialog, _dialog_open, _state,
+                                      goto_warp)
+    mk = MapKnowledge()
+    dwell_until = {}
+    in_game = False                                           # pre-truck screens masquerade as
+                                                              # map (0,0): A-advance until the
+                                                              # truck has been seen once
+
+    def warp_to(dst: str) -> None:
+        t, _, _ = _state(runner)
+        key = f"{t.map_group},{t.map_num}"
+        cand = [w for w in mk.warps.get(key, []) if w["dst_map"] == dst]
+        if cand:
+            goto_warp(runner, mk, cand[0]["x"], cand[0]["y"], budget=6000)
+
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "fight")
+            continue
+        t, _, _ = _state(runner)
+        if t is None:
+            _hold(runner, ["A"], 3, "intro"); _hold(runner, [], 20, "intro")
+            continue
+        key = (t.map_group, t.map_num)
+        if key == (25, 40):                                   # the truck FIRST: it false-
+            in_game = True                                    # positives the dialog detector
+            for d in ("RIGHT", "RIGHT", "DOWN", "UP"):
+                _hold(runner, [d], 16, "intro"); _hold(runner, [], 8, "intro")
+            continue
+        if _dialog_open(runner):
+            _hold(runner, ["A"], 3, "intro"); _hold(runner, [], 14, "intro")
+            continue
+        if not in_game:                                       # title / naming / cutscenes
+            if rng.random() < 0.2:
+                _hold(runner, ["START"], 3, "intro"); _hold(runner, [], 14, "intro")
+            _hold(runner, ["A"], 3, "intro"); _hold(runner, [], 16, "intro")
+            continue
+        elif key == (0, 9):                                   # Littleroot: into a house
+            dst = "1,0" if runner.frame_idx < budget // 2 else "1,2"
+            warp_to(dst)
+            _clear_dialog(runner, "intro")
+        elif key in ((1, 0), (1, 2)):                         # ground floors: upstairs
+            if runner.frame_idx >= dwell_until.get(key, 0):
+                dwell_until[key] = runner.frame_idx + 99_999_999   # once
+                _hold(runner, [], 240, "intro")               # let the mover scene play
+            warp_to("1,1" if key == (1, 0) else "1,3")
+            _clear_dialog(runner, "intro")
+        elif key in ((1, 1), (1, 3)):                         # bedrooms: poke the walls (the
+            for tx in range(1, 9):                            # clock + room objects), then down
+                from collection.navigator import goto as _goto
+                import numpy as np
+
+                def goal(t_, beh, tx=tx):
+                    m = np.zeros(t_.grid.shape, bool)
+                    m[8, tx + 7] = True                       # row 1 of the room, facing up
+                    return m & (((t_.grid >> 10) & 3) == 0)
+                if _goto(runner, mk, goal, budget=1200, phase="intro") == "arrived":
+                    _tap_turn(runner, "UP")
+                    runner.perform_action("A", speed="normal", record_end_state=False)
+                    _hold(runner, [], 30, "intro")
+                    for _ in range(12):                       # clock UI / dialogs: confirm out
+                        if not _dialog_open(runner):
+                            break
+                        _hold(runner, ["A"], 3, "intro"); _hold(runner, [], 14, "intro")
+            _hold(runner, [], 240, "intro")
+            warp_to("1,0" if key == (1, 1) else "1,2")
+        else:                                                 # post-intro drift: wander home
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 40), "intro")
+
+
+def job_interior_dwell(runner, rng: random.Random, budget: int, target_map: str = "",
+                       dwell: int = 80):
+    """Terrain-DWELL crawler for one interior. Tours move continuously, so a metatile only
+    reached during fast warp-transit through a room never clears the 100-frame floor (Petalburg
+    Gym: 9x112 / 38 warp-rooms traversed in 54 standing positions). This systematically goto's a
+    COVERING set of waypoints (one per ~camera window over the reachable interior) and DWELLS at
+    each, so every reachable metatile lands in a camera window for 100+ frames. goto_map there
+    first if target_map given; battles are fled (interiors shouldn't have wild ones)."""
+    from collection.navigator import MapKnowledge, _state, goto, goto_map
+    import numpy as np
+    mk = MapKnowledge()
+    covered: set = set()
+    while runner.frame_idx < budget:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "run")
+            continue
+        t, x, y = _state(runner)
+        if t is None:
+            _hold(runner, [], 30, "dwell"); continue
+        key = f"{t.map_group},{t.map_num}"
+        if target_map and key != target_map:
+            if goto_map(runner, mk, target_map) not in ("arrived", "battle"):
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dwell")
+            continue
+        # reachable cells (buffer coords) from here, over the live collision mask
+        walk = ((t.grid >> 10) & 3) == 0
+        h, w = walk.shape
+        from collections import deque
+        seen = np.zeros((h, w), bool)
+        bx, by = x + 7, y + 7
+        if not (0 <= by < h and 0 <= bx < w):
+            _hold(runner, [], 30, "dwell"); continue
+        seen[by, bx] = True
+        q = deque([(bx, by)])
+        while q:
+            cx, cy = q.popleft()
+            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < w and 0 <= ny < h and walk[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True; q.append((nx, ny))
+        # covering waypoints: snap reachable cells to a 6x6 lattice, one per cell not yet dwelt
+        ys, xs = np.nonzero(seen)
+        lattice = {}
+        for cxr, cyr in zip(xs.tolist(), ys.tolist()):
+            lattice.setdefault((cxr // 6, cyr // 6), (cxr, cyr))
+        todo = [(wx, wy) for k_, (wx, wy) in lattice.items() if k_ not in covered]
+        if not todo:
+            if not covered:                                   # nothing reachable here
+                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dwell")
+                continue
+            return                                            # whole interior dwelt
+        wx, wy = min(todo, key=lambda c: abs(c[0] - bx) + abs(c[1] - by))
+
+        def goal(t_, beh, wx=wx, wy=wy):
+            m = np.zeros(t_.grid.shape, bool)
+            if wy < m.shape[0] and wx < m.shape[1]:
+                m[wy, wx] = True
+            return m & (((t_.grid >> 10) & 3) == 0)
+
+        r = goto(runner, mk, goal, budget=4000, phase="dwell")
+        covered.add((wx // 6, wy // 6))
+        if r == "arrived":
+            _hold(runner, [], dwell, "dwell")                 # let the camera window accumulate
+            for d in (rng.choice(DIRS), rng.choice(DIRS)):    # small pan widens the window
+                _tap_turn(runner, d); _hold(runner, [], dwell // 2, "dwell")
+
+
 def job_pingpong(runner, rng: random.Random, budget: int, maps: list | None = None):
     """Walk back and forth between maps (goto_map round-trips) — the volume closer for warp /
     CONNECTION pairs the cycler can't grind (it only cycles the current map's warp events)."""
@@ -740,6 +883,8 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "battle_far": job_battle_far,
         "trainer_hunt": job_trainer_hunt,
         "pingpong": job_pingpong,
+        "interior_dwell": job_interior_dwell,
+        "intro": job_intro,
         "dialogue_nav": job_dialogue_nav,
         "menus_labeled": job_menus_labeled,
         "story": job_story,

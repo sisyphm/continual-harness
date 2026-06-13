@@ -41,63 +41,28 @@ def camera_topleft(px, py, mw, mh):
 
 def reachable_window_metatiles(grid: np.ndarray, beh: np.ndarray | None,
                                seeds: set[tuple[int, int]]) -> set[int]:
-    """Metatiles visible from any REACHABLE standing cell: elevation+ledge BFS (the navigator's
-    movement model) from every observed player position, then each reachable cell contributes
-    its camera window. This is the access-aware terrain UNIVERSE — metatiles that exist only in
-    Surf-gated map regions can never be on a pre-badge screen and must not be red forever."""
-    from collections import deque
-    from collection.navigator import _JUMP
+    """The access-aware terrain UNIVERSE: every metatile the live camera can show from a position
+    the player ACTUALLY STOOD ON. Each observed seed contributes its clamped camera window over
+    the de-bordered interior; the union is the universe.
+
+    NOT a collision BFS — that walked through collision-open but SCRIPT-LOCKED doors (the
+    Petalburg Gym guard blocks the inner rooms until 4 badges) and through Surf/elevation gates,
+    inventing 'red forever' tiles the pre-badge player can never put on screen. Observed-seed
+    dilation is exactly what the game rendered: after the exhaustive dwell pass the player stands
+    on every reachable cell, so accessible terrain is fully covered and only genuinely
+    unreachable rooms drop out. The 7-tile border is excluded (stale gBackupMapLayout from the
+    prior map; reading it invented ~130 phantom metatiles per interior)."""
     h, w = grid.shape
     mh, mw = h - 14, w - 15
-    walk = ((grid >> 10) & 3) == 0
-    elev = (grid >> 12) & 0xF
-    seen3 = set()
-    reach = np.zeros((h, w), bool)
-    q = deque()
-    for px, py in seeds:
-        bx, by = px + 7, py + 7
-        if 0 <= by < h and 0 <= bx < w:
-            s3 = (bx, by, int(elev[by, bx]))
-            if s3 not in seen3:
-                seen3.add(s3)
-                reach[by, bx] = True
-                q.append(s3)
-    while q:
-        x, y, e = q.popleft()
-        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-            nx, ny = x + dx, y + dy
-            if not (0 <= nx < w and 0 <= ny < h):
-                continue
-            if walk[ny, nx]:
-                te = int(elev[ny, nx])
-                if te not in (0, 15) and e not in (0, 15) and te != e:
-                    continue
-                n3 = (nx, ny, e if te == 15 else te)
-            elif beh is not None and _JUMP.get(int(beh[ny, nx])) == (dx, dy):
-                lx, ly = x + 2 * dx, y + 2 * dy
-                if not (0 <= lx < w and 0 <= ly < h) or not walk[ly, lx]:
-                    continue
-                n3 = (lx, ly, int(elev[ly, lx]))
-            else:
-                continue
-            if n3 not in seen3:
-                seen3.add(n3)
-                reach[n3[1], n3[0]] = True
-                q.append(n3)
-    # A metatile counts only if it sits at an INTERIOR cell (7 <= r < 7+mh, 7 <= c < 7+mw) that
-    # falls in some reachable cell's camera window. The 7-tile border padding holds STALE
-    # gBackupMapLayout from the previously-loaded map (the buffer isn't cleared on map change) —
-    # reading it invented ~130 phantom metatiles per interior (verified on the Rustboro Gym:
-    # 82k frames inside, yet 141 "red" of which only 11 were real room tiles). Restrict to the
-    # de-bordered interior so the universe = terrain the clamped live camera can actually show.
     on_screen = np.zeros((h, w), bool)
-    for by, bx in zip(*np.nonzero(reach)):
-        cx, cy = camera_topleft(int(bx) - 7, int(by) - 7, mw, mh)
+    for px, py in seeds:
+        if not (0 <= py < mh and 0 <= px < mw):              # drop transition-frame garbage seeds
+            continue                                          # (coords valid only on the real map)
+        cx, cy = camera_topleft(px, py, mw, mh)
         on_screen[cy + 7:cy + 7 + SCREEN_MH, cx + 7:cx + 7 + SCREEN_MW] = True
     interior = np.zeros((h, w), bool)
     interior[7:7 + mh, 7:7 + mw] = True
-    vis = grid[on_screen & interior] & 0x3FF
-    return {int(v) for v in np.unique(vis)}
+    return {int(v) for v in np.unique(grid[on_screen & interior] & 0x3FF)}
 
 
 def main():
