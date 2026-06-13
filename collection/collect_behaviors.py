@@ -611,22 +611,22 @@ def job_intro(runner, rng: random.Random, budget: int):
             _hold(runner, [rng.choice(DIRS)], rng.randint(16, 40), "intro")
 
 
-def job_interior_dwell(runner, rng: random.Random, budget: int, target_map: str = "",
-                       dwell: int = 80):
-    """Terrain-DWELL crawler for one interior. Tours move continuously, so a metatile only
-    reached during fast warp-transit through a room never clears the 100-frame floor (Petalburg
-    Gym: 9x112 / 38 warp-rooms traversed in 54 standing positions). This systematically goto's a
-    COVERING set of waypoints (one per ~camera window over the reachable interior) and DWELLS at
-    each, so every reachable metatile lands in a camera window for 100+ frames. goto_map there
-    first if target_map given; battles are fled (interiors shouldn't have wild ones)."""
-    from collection.navigator import MapKnowledge, _state, goto, goto_map
+def job_interior_dwell(runner, rng: random.Random, budget: int, target_map: str = ""):
+    """Terrain-DWELL crawler. Tours move continuously, so a metatile reached only during fast
+    warp-transit never clears the 100-frame floor. This STEP-BY-STEP walks the reachable area
+    toward the least-visited cell each move (greedy coverage over the live collision mask), so
+    the camera pans across every reachable metatile many times. Robust where waypoint-goto
+    failed (exact-cell goals collapse among furniture): here every move is one adjacent step that
+    actually commits, and the target is recomputed each step. Stays on target_map (goto_map back
+    if it crosses a warp); battles are fled."""
+    from collection.navigator import MapKnowledge, _state, _step, goto_map, DIRS as ND
     import numpy as np
     mk = MapKnowledge()
-    covered: set = set()
+    visits: dict = {}                                          # (x,y) -> times stood here
+    stuck = 0
     while runner.frame_idx < budget:
         if _in_battle(runner):
-            _battle_one(runner, rng, "run")
-            continue
+            _battle_one(runner, rng, "run"); continue
         t, x, y = _state(runner)
         if t is None:
             _hold(runner, [], 30, "dwell"); continue
@@ -635,47 +635,25 @@ def job_interior_dwell(runner, rng: random.Random, budget: int, target_map: str 
             if goto_map(runner, mk, target_map) not in ("arrived", "battle"):
                 _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dwell")
             continue
-        # reachable cells (buffer coords) from here, over the live collision mask
+        visits[(x, y)] = visits.get((x, y), 0) + 1
+        _hold(runner, [], 24, "dwell")                        # brief dwell -> camera-window frames
         walk = ((t.grid >> 10) & 3) == 0
         h, w = walk.shape
-        from collections import deque
-        seen = np.zeros((h, w), bool)
-        bx, by = x + 7, y + 7
-        if not (0 <= by < h and 0 <= bx < w):
-            _hold(runner, [], 30, "dwell"); continue
-        seen[by, bx] = True
-        q = deque([(bx, by)])
-        while q:
-            cx, cy = q.popleft()
-            for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                nx, ny = cx + dx, cy + dy
-                if 0 <= nx < w and 0 <= ny < h and walk[ny, nx] and not seen[ny, nx]:
-                    seen[ny, nx] = True; q.append((nx, ny))
-        # covering waypoints: snap reachable cells to a 6x6 lattice, one per cell not yet dwelt
-        ys, xs = np.nonzero(seen)
-        lattice = {}
-        for cxr, cyr in zip(xs.tolist(), ys.tolist()):
-            lattice.setdefault((cxr // 6, cyr // 6), (cxr, cyr))
-        todo = [(wx, wy) for k_, (wx, wy) in lattice.items() if k_ not in covered]
-        if not todo:
-            if not covered:                                   # nothing reachable here
-                _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "dwell")
-                continue
-            return                                            # whole interior dwelt
-        wx, wy = min(todo, key=lambda c: abs(c[0] - bx) + abs(c[1] - by))
-
-        def goal(t_, beh, wx=wx, wy=wy):
-            m = np.zeros(t_.grid.shape, bool)
-            if wy < m.shape[0] and wx < m.shape[1]:
-                m[wy, wx] = True
-            return m & (((t_.grid >> 10) & 3) == 0)
-
-        r = goto(runner, mk, goal, budget=4000, phase="dwell")
-        covered.add((wx // 6, wy // 6))
-        if r == "arrived":
-            _hold(runner, [], dwell, "dwell")                 # let the camera window accumulate
-            for d in (rng.choice(DIRS), rng.choice(DIRS)):    # small pan widens the window
-                _tap_turn(runner, d); _hold(runner, [], dwell // 2, "dwell")
+        # step toward the least-visited walkable 4-neighbour (greedy spread); ties -> random
+        opts = []
+        for (dx, dy), d in ND.items():
+            nx, ny = x + dx + 7, y + dy + 7
+            if 0 <= ny < h and 0 <= nx < w and walk[ny, nx]:
+                opts.append((visits.get((x + dx, y + dy), 0), rng.random(), d))
+        if not opts:
+            _hold(runner, [rng.choice(DIRS)], 8, "dwell"); continue
+        opts.sort()
+        if _step(runner, opts[0][2]):
+            stuck = 0
+        else:
+            stuck += 1
+            if stuck >= 6:                                    # corner/NPC-boxed: nudge randomly
+                _hold(runner, [rng.choice(DIRS)], rng.randint(8, 20), "dwell"); stuck = 0
 
 
 def job_pingpong(runner, rng: random.Random, budget: int, maps: list | None = None):
