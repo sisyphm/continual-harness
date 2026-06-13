@@ -535,6 +535,27 @@ def job_trainer_hunt(runner, rng: random.Random, budget: int, target_map: str = 
         _clear_dialog(runner, "trainer_nav")
 
 
+def job_pingpong(runner, rng: random.Random, budget: int, maps: list | None = None):
+    """Walk back and forth between maps (goto_map round-trips) — the volume closer for warp /
+    CONNECTION pairs the cycler can't grind (it only cycles the current map's warp events)."""
+    from collection.navigator import MapKnowledge, _state, goto_map
+    mk = MapKnowledge()
+    maps = maps or []
+    i = 0
+    while runner.frame_idx < budget and maps:
+        if _in_battle(runner):
+            _battle_one(runner, rng, "run")
+            continue
+        target = maps[i % len(maps)]
+        t, _, _ = _state(runner)
+        if t is not None and f"{t.map_group},{t.map_num}" == target:
+            i += 1
+            _hold(runner, [], rng.randint(30, 90), "pingpong")
+            continue
+        if goto_map(runner, mk, target) not in ("arrived", "battle"):
+            _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "pingpong")
+
+
 def job_dialogue_nav(runner, rng: random.Random, budget: int, target_map: str = ""):
     """Dialogue EXHAUSTION: walk to every NPC and sign on the map ON PURPOSE and talk/read,
     advancing with varied styles (vs the old job's blind facing-and-pressing). NPCs are live
@@ -647,11 +668,19 @@ def job_story(runner, rng: random.Random, budget: int):
     """One-off scene replayer: a generic story-advancer for scripted sequences (intro + naming
     screen + truck + Birch rescue). Dialog boxes advance with varied styles; choice menus get A
     (first option — keeps gender=BOY policy) with occasional DOWN first (varies the preset NAME
-    pick); otherwise watch or wander gently. Seeded at start/truck states ×N = the one-off axis."""
-    from collection.navigator import _dialog_open
+    pick); otherwise watch or wander gently. Seeded at start/truck states ×N = the one-off axis.
+    The TRUCK (25,40) is escaped DETERMINISTICALLY: its rendering false-positives the dialog
+    detector, and every pre-fix story run burned its whole budget inside (probed: RIGHT/DOWN/UP
+    walks out in ~10 steps — the moving-day sprites were never recorded until this)."""
+    from collection.navigator import _dialog_open, _state
     while runner.frame_idx < budget:
         if _in_battle(runner):
             _battle_one(runner, rng, "fight")
+            continue
+        t_, _, _ = _state(runner)
+        if t_ is not None and (t_.map_group, t_.map_num) == (25, 40):
+            for d_ in ("RIGHT", "RIGHT", "DOWN", "UP"):
+                _hold(runner, [d_], 16, "story"); _hold(runner, [], 8, "story")
             continue
         if _dialog_open(runner):
             style = rng.choice(ADVANCE_STYLES)
@@ -710,6 +739,7 @@ JOBS = {"idle": job_idle, "fidget": job_fidget, "battle": job_battle,
         "fish": job_fish,
         "battle_far": job_battle_far,
         "trainer_hunt": job_trainer_hunt,
+        "pingpong": job_pingpong,
         "dialogue_nav": job_dialogue_nav,
         "menus_labeled": job_menus_labeled,
         "story": job_story,
