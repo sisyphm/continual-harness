@@ -7,7 +7,9 @@ maxHP=33@+0x2C, moves=[Tackle,Growl,Mud-Slap,Water Gun] — every field matches 
   gBattleMons          0x02024084 — struct BattlePokemon[4], 0x58 bytes each:
       +0x00 u16 species   +0x0C u16 moves[4]   +0x24 u8 pp[4]
       +0x28 u16 hp        +0x2A u8 level       +0x2C u16 maxHP    +0x4C u32 status1
-  gBattleTypeFlags     0x02022AAE — u32 bitflags (wild/trainer/etc.), recorded raw
+  gBattleTypeFlags     0x02022FEC — u32 bitflags (wild/trainer/double/etc.), recorded raw
+                       (verified on the recorded Roxanne fight: bit 0x08=TRAINER set on every
+                       battle frame at 0x02022FEC, while the old 0x02022AAE read 0 always — dead)
   gBattleCommunication 0x02024A60 — 8 bytes of battle phase machine, recorded raw (the model's
                        battle-phase token; exact semantics learned downstream, not asserted)
   gMain.inBattle       0x030026F9 bit1 (Phase-0-validated battle gate)
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from collection.extractors.ram import GBAState
 
 G_BATTLE_MONS, MON_SIZE, N_BATTLERS = 0x02024084, 0x58, 4
-G_BATTLE_TYPE = 0x02022AAE
+G_BATTLE_TYPE = 0x02022FEC
 G_BATTLE_COMM = 0x02024A60
 IN_BATTLE_ADDR, IN_BATTLE_MASK = 0x030026F9, 0x02
 MAX_SPECIES = 440                          # Gen-3 internal species id bound
