@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--data_root", default="../pokemon-worldmodel/data")
     ap.add_argument("--out_dir", default="../pokemon-worldmodel/data/processed/conditions")
     ap.add_argument("--workers", type=int, default=10)
+    ap.add_argument("--force", action="store_true",
+                    help="re-extract every run even if its npz exists (use after an extractor fix)")
     args = ap.parse_args()
     out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     export_charset(out_dir / "charset.json")               # the charset's cross-repo home
@@ -38,7 +40,7 @@ def main():
     todo = []
     for name, d, kind in discover_runs(Path(args.data_root)):
         out = out_dir / f"{kind}__{name}.npz"
-        if not out.exists():
+        if args.force or not out.exists():
             todo.append((str(d), str(out), f"{kind}__{name}"))
     print(f"{len(todo)} runs to precompute…")
     with Pool(args.workers) as pool:

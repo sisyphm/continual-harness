@@ -59,6 +59,12 @@ def main():
     ap.add_argument("--rom", default="Emerald-GBAdvance/rom.gba")
     ap.add_argument("--data_root", default="../pokemon-worldmodel/data")
     ap.add_argument("--limit", type=int, default=0, help="construct at most N entries (pilot)")
+    ap.add_argument("--starter_farm", default="", help="comma-sep species ids to OVER-collect as "
+                    "player-side battle leads, ungated from the coverage report (e.g. '280,277'). "
+                    "Spans every grassy base × --farm_levels — for rebalancing a species the corpus "
+                    "has but is drowned out by (the Mudkip-default fix), not just first-presence.")
+    ap.add_argument("--farm_levels", default="12,16", help="levels for --starter_farm leads "
+                    "(sprite is level-independent; higher = survives longer = more battle frames)")
     args = ap.parse_args()
     root = Path(args.data_root)
     bank_dir = root / "processed/state_bank"
@@ -78,6 +84,15 @@ def main():
         targets.append({"name": f"species_{sp}_l{SPECIES_LEVEL}", "intent": "battle",
                         "base": grassy[i % len(grassy)], "species": sp,
                         "level": SPECIES_LEVEL, "near_levelup": False, "balls": 20})
+    if args.starter_farm:                                  # over-collect a known-but-underrepresented
+        farm_sp = [int(x) for x in args.starter_farm.split(",")]   # species across ALL grassy bases
+        farm_lv = [int(x) for x in args.farm_levels.split(",")]    # (background variety) × levels
+        for sp in farm_sp:
+            for lv in farm_lv:
+                for b in grassy:
+                    targets.append({"name": f"species_{sp}_l{lv}_{b['name']}", "intent": "battle",
+                                    "base": b, "species": sp, "level": lv,
+                                    "near_levelup": False, "balls": 20})
     for sp in STARTERS:
         targets.append({"name": f"evolve_{sp}_l15", "intent": "evolve",
                         "base": grassy[len(targets) % len(grassy)], "species": sp,
