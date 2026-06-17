@@ -1,4 +1,4 @@
-"""Phase-0 audit — replay-determinism check (WORLD_MODEL_PLAN_RUNG_A_PRIME.md §2.5).
+"""Phase-0 audit — replay-determinism check (finding recorded in ../pokemon-worldmodel/docs/PLAN.md §5).
 
 The storage principle "savestate + input log => everything re-derivable" only holds if replay is
 bit-deterministic. Test: load a storyline run's `initial.state`, re-apply its per-frame

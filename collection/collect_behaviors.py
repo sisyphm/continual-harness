@@ -1,7 +1,7 @@
 """Deficit-driven behavior collection — Phase 2 of the Rung-A′ plan (shopping list S1–S10).
 
 Each JOB is a player-like behavior policy that the goal-directed producers never exhibited
-(measured in `WORLD_MODEL_PLAN_RUNG_A_PRIME_PHASE0.md` §3). Runs record through the SAME
+(the deficit list S1–S10 in ../pokemon-worldmodel/docs/PLAN.md §5). Runs record through the SAME
 substrate as all existing data (ChunkRecorder + WorldModelSink: RGB + action + full PPU/WRAM +
 semantic per frame), so every audit and extractor applies to the new data unchanged.
 

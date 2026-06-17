@@ -2,7 +2,7 @@
 
 Reads every run's `semantic.jsonl` + `actions.jsonl` (+ per-frame brightness, computed from the RGB
 chunks once and cached as `brightness.npy`), and measures what the Rung-A′ plan needs to know BEFORE
-training (`WORLD_MODEL_PLAN_RUNG_A_PRIME.md` §2):
+training (../pokemon-worldmodel/docs/PLAN.md §5):
 
   • mode mass (L1 proxy): battle / dark(warp/fade) / overworld — exact taxonomy is Layer 2 (RAM)
   • per-map frame mass

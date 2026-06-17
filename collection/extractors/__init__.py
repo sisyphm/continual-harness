@@ -1,4 +1,4 @@
-"""Rung-A′ condition extractors (Phase 1 of WORLD_MODEL_PLAN_RUNG_A_PRIME.md).
+"""Rung-A′ condition extractors (the offline=online condition spec: ../pokemon-worldmodel/docs/STRUCTURE.md §2–3).
 
 One module per condition group, all reading GBA memory through `ram.GBAState` — a single parser
 code path that runs identically over RECORDED condition blobs (offline precompute/audit) and the
