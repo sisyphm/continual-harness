@@ -66,3 +66,49 @@ def battle_state(st: GBAState) -> dict | None:
     return {"battlers": battlers,
             "battle_type": st.u32(G_BATTLE_TYPE),
             "comm": st.bytes(G_BATTLE_COMM, 8)}
+
+
+# --- battle sprite splat (identity_grounded, PLAN §8.3) ----------------------------------------
+# gBattlerSpriteIds @ 0x020241E4 (u8[4]) — battler -> gSprites slot. VALIDATED 2026-06-18 by overlay:
+# gBattleMons matches the decomp exactly (0x02024084), so the pokeemerald symbol address applies;
+# on a recorded Mudkip-vs-Poochyena battle, slot[0]->Mudkip back-sprite (sp283), slot[1]->Poochyena
+# (sp286), positions match the on-screen mons AND their HP boxes; slot reallocation (enemy 3->4->6) is
+# followed; the gSprites `invisible` flag (byte 0x3E bit 2) is the mon-is-out signal.
+G_BATTLER_SPRITE_IDS = 0x020241E4
+GSPRITES_BAT, SPRITE_STRIDE = 0x02020630, 0x44      # struct Sprite (pokeemerald): see offsets below
+_OAM_DIMS = {(0, 0): (8, 8), (0, 1): (16, 16), (0, 2): (32, 32), (0, 3): (64, 64),
+             (1, 0): (16, 8), (1, 1): (32, 8), (1, 2): (32, 16), (1, 3): (64, 32),
+             (2, 0): (8, 16), (2, 1): (8, 32), (2, 2): (16, 32), (2, 3): (32, 64)}
+
+
+def _s8(v: int) -> int:
+    return v - 256 if v >= 128 else v
+
+
+def battle_sprites(st) -> list[dict]:
+    """On-screen battler MON sprites for the spatial species-splat. For each battler whose sprite is
+    VISIBLE (mon actually out — not the pre-throw intro): species (gBattleMons) + role + screen
+    top-left px + size px. Empty when no battle / mons not out. (Trainer-sprite identity is a
+    separate follow-up.) Top-left = pos1(+0x20) + pos2(+0x24) + centerToCornerVec(s8 +0x28/+0x29)."""
+    if not in_battle(st):
+        return []
+    out = []
+    for battler in range(N_BATTLERS):
+        sid = st.u8(G_BATTLER_SPRITE_IDS + battler)
+        if sid >= 64:
+            continue
+        base = GSPRITES_BAT + sid * SPRITE_STRIDE
+        if (st.u16(base + 0x3E) >> 2) & 1:                 # invisible -> mon not on screen yet
+            continue
+        species = st.u16(G_BATTLE_MONS + battler * MON_SIZE)
+        if not (0 < species <= MAX_SPECIES):
+            continue
+        w, h = _OAM_DIMS.get(((st.u16(base) >> 14) & 3, (st.u16(base + 2) >> 14) & 3), (64, 64))
+        x = st.s16(base + 0x20) + st.s16(base + 0x24) + _s8(st.u8(base + 0x28))
+        y = st.s16(base + 0x22) + st.s16(base + 0x26) + _s8(st.u8(base + 0x29))
+        if not (w >= 32 and h >= 32 and -w < x < 240 and -h < y < 160):
+            continue                                       # reject uninitialized opening-wipe frames
+        out.append({"battler": battler, "species": species,
+                    "kind": 1 if battler == 0 else 2,       # 1=player-mon, 2=enemy-mon (singles)
+                    "x": x, "y": y, "w": w, "h": h})
+    return out
