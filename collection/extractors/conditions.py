@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.extractors.battle import battle_state, in_battle
+from collection.extractors.battle import battle_sprites, battle_state, in_battle
 from collection.extractors.entities import DIRECTIONS, camera_px, entities, player_state
 from collection.extractors.ram import GBAState, iter_states
 from collection.extractors.terrain import terrain
@@ -129,6 +129,16 @@ class RunConditionWriter:
                 bhp[s], bmx[s], bst[s] = bt.hp, bt.max_hp, bt.status1
                 bmv[s] = bt.moves; bpp[s] = bt.pp
         r["bat"] = (bv, bs, blv, bhp, bmx, bst, bmv, bpp, btype, np.frombuffer(bcomm, np.uint8))
+        # identity_grounded: on-screen battler MON sprites for the spatial species-splat (K=4 slots,
+        # enumeration order; `kind` 1=player-mon 2=enemy-mon). Screen px (s16; negative when sliding
+        # in off-screen), size px. See battle.battle_sprites (gBattlerSpriteIds, validated).
+        K = 4
+        bsv = np.zeros(K, np.uint8); bssp = np.zeros(K, np.uint16); bskd = np.zeros(K, np.uint8)
+        bsscr = np.zeros((K, 2), np.int16); bssz = np.zeros((K, 2), np.uint8)
+        for j, d in enumerate(battle_sprites(st)[:K]):
+            bsv[j] = 1; bssp[j] = d["species"]; bskd[j] = d["kind"]
+            bsscr[j] = (d["x"], d["y"]); bssz[j] = (d["w"], d["h"])
+        r["bat_sprite"] = (bsv, bssp, bskd, bsscr, bssz)
         return r
 
     def _merge_streamed_texts(self) -> tuple[list[str], dict[int, tuple[int, int]]]:
@@ -184,6 +194,10 @@ class RunConditionWriter:
                      "bat_moves", "bat_pp")
         for i, nm in enumerate(bat_names):
             arrs[nm] = np.stack([r["bat"][i] for r in R])
+        bs_names = ("bat_sprite_valid", "bat_sprite_species", "bat_sprite_kind",
+                    "bat_sprite_screen", "bat_sprite_size")          # identity_grounded
+        for i, nm in enumerate(bs_names):
+            arrs[nm] = np.stack([r["bat_sprite"][i] for r in R])
         for k, g in enumerate(self.grids):
             arrs[f"grid_{k}"] = g
         out.parent.mkdir(parents=True, exist_ok=True)
