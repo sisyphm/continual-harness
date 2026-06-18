@@ -5,9 +5,19 @@ exact frame the model learns to reproduce (the project's 'trust nothing, verify 
 Currently overlays decoded OAM sprites (VERIFIED: boxes bound the on-screen sprites exactly) and
 prints gBattleMons species. To be extended with glyph_grid + hp_fill overlays as those fields land.
 
-VERIFIED so far: OAM sprite decode (positions/sizes correct). OPEN: robust battler→sprite labeling
-(species/role) — position is NOT enough (the battle OPENING shows the player TRAINER, not the mon,
-and sprites slide during the intro), so it needs gBattlerSpriteIds + a 'mon-is-out' phase signal.
+VERIFIED (deep dive 2026-06-18):
+  • OAM sprite decode correct (boxes bound the on-screen sprites exactly).
+  • struct Sprite (gSprites @0x02020630, 0x44/slot, from pokeemerald): pos1 @+0x20, pos2 @+0x24,
+    centerToCornerVec(s8) @+0x28/+0x29, invisible = byte 0x3E bit 2, OAM attr0/attr1 @+0x00/+0x02.
+    On-screen top-left = pos1 + pos2 + centerToCornerVec. (battle has no overworld camera.)
+  • gBattleMons species (player [0], enemy [1] in singles) @0x02024084 + b*0x58, validated on frames.
+OPEN — robust battler→sprite labeling NEEDS gBattlerSpriteIds (the engine's battler→current-slot map):
+  • position/role heuristics FAIL: the battle OPENING shows the player TRAINER (not the mon); sprites
+    SLIDE during the intro; and gSprites SLOTS get REALLOCATED mid-battle (enemy was slot 3 at intro,
+    then slot 4/6 later; slot 3 became the PLAYER). So no fixed slot and no position rule is robust.
+  • blind ewram scans give FALSE POSITIVES (e.g. 0x020201CD passed a 460-frame track but read [3,3]
+    off-screen elsewhere). Resolve gBattlerSpriteIds from the AUTHORITATIVE pokeemerald/retail address
+    (gBattleMons matches the decomp, so decomp addrs apply) and validate on CALM (non-animation) frames.
 
 Run (conda pokemon-wm or harness venv; recorded blobs need no mgba):
     python -m collection.extractors.verify_overlay <run_dir> [out_dir]
