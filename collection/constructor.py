@@ -45,6 +45,11 @@ ITEM_POKE_BALL, MAX_ITEM_ID = 4, 376
 ITEM_OLD_ROD = 262
 SB1_REGISTERED_ITEM = 0x496            # u16, plain (not key-encrypted) — pinned by the fish test:
                                        # SELECT must cast the rod in-game after construction
+SB1_VARS = 0x139C                      # SaveBlock1.vars[256] (0x4000..0x40FF), u16, PLAIN (no key).
+#   VALIDATED 2026-06-20: read VAR_STARTER_MON (0x4023) from the recorded MAY_ROUTE103 run = 2
+#   (=Mudkip), the corpus's only starter; other candidate offsets gave garbage.
+VAR_STARTER_MON = 0x4023               # Route-103 rival switches on this: 0=Treecko→May Torchic,
+#   1=Torchic→May Mudkip, 2=Mudkip→May Treecko (ROM script @0x081EC468, trainerbattle 532/535/529).
 N_SPECIES, MUDKIP = 412, 283           # corpus-pinned: player lead of the chain save is Mudkip
 
 # Gen-3 box substructure order: permutations of (Growth, Attacks, EVs, Misc) by personality % 24
@@ -288,6 +293,17 @@ class StateConstructor:
         self._write_ewram(st.u32(SB1_PTR) + SB1_REGISTERED_ITEM, _s.pack("<H", item_id))
         self.report["edits"].append({"registered_item": item_id})
 
+    def set_var(self, var_id: int, value: int) -> None:
+        """Write a scripting VAR in SaveBlock1.vars (0x4000..0x40FF). Vars are stored PLAIN — no
+        security-key XOR (unlike money/bag) — so this is a direct u16 write, verified in finalize().
+        Used to set VAR_STARTER_MON so the Route-103 rival fields the right starter (the corpus only
+        has VAR_STARTER_MON=2 / Mudkip → May Treecko; set 0/1 for the missing Torchic/Mudkip branches)."""
+        assert 0x4000 <= var_id <= 0x40FF, f"var {var_id:#x} outside SaveBlock1.vars range"
+        assert 0 <= value <= 0xFFFF, "var value must fit u16"
+        st = self._st()
+        self._write_ewram(st.u32(SB1_PTR) + SB1_VARS + (var_id - 0x4000) * 2, struct.pack("<H", value))
+        self.report["edits"].append({"var": var_id, "value": value})
+
     def give_item(self, item_id: int, qty: int, pocket: str = "balls") -> None:
         st = self._st()
         key16 = self._key() & 0xFFFF
@@ -319,6 +335,10 @@ class StateConstructor:
             elif "registered_item" in e:
                 assert st.u16(st.u32(SB1_PTR) + SB1_REGISTERED_ITEM) == e["registered_item"]
                 e["verified"] = True
+            elif "var" in e:
+                addr = st.u32(SB1_PTR) + SB1_VARS + (e["var"] - 0x4000) * 2
+                assert st.u16(addr) == e["value"], "post-edit var readback failed"
+                e["verified"] = True
             else:
                 key16 = self._key() & 0xFFFF
                 off, slots = POCKETS[e["pocket"]]
@@ -345,6 +365,8 @@ def main():
     ap.add_argument("--level", type=int, default=10)
     ap.add_argument("--moves", default=None, help="comma-separated move ids")
     ap.add_argument("--balls", type=int, default=0)
+    ap.add_argument("--set_var", default=None, help="'VAR=VALUE' (hex/dec), e.g. 0x4023=0 to set "
+                    "VAR_STARTER_MON so the Route-103 rival fields the matching starter")
     args = ap.parse_args()
 
     c = StateConstructor(args.rom, args.base)
@@ -354,6 +376,9 @@ def main():
         c.set_party_slot(args.slot, args.species, args.level, moves)
     if args.balls:
         c.give_item(ITEM_POKE_BALL, args.balls, "balls")
+    if args.set_var:
+        v, val = args.set_var.split("=")
+        c.set_var(int(v, 0), int(val, 0))
     p = c.finalize(args.out)
     print(json.dumps(c.report, indent=1))
     print(f"constructed state -> {p}")
