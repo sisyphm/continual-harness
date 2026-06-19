@@ -76,6 +76,19 @@ def battle_state(st: GBAState) -> dict | None:
 # followed; the gSprites `invisible` flag (byte 0x3E bit 2) is the mon-is-out signal.
 G_BATTLER_SPRITE_IDS = 0x020241E4
 GSPRITES_BAT, SPRITE_STRIDE = 0x02020630, 0x44      # struct Sprite (pokeemerald): see offsets below
+# gHealthboxSpriteIds @ 0x03005D70 (u8[4]) — battler -> its HP-box sprite. The HP box is created and
+# made visible only once that battler's MON is on the field (sent out), so "healthbox visible" is the
+# clean, universal MON-is-out gate. VALIDATED on recorded trainer/wild battles (2026-06-20): it flips
+# visible exactly at send-out and stays visible through the rest of the battle.
+G_HEALTHBOX = 0x03005D70
+# gTrainerBattleOpponent_A @ 0x02038BCA (u16) — the opponent trainer id (index into gTrainers).
+# VALIDATED: on every recorded trainer battle gTrainers[this].party[0].species == gBattleMons[1]
+# (enemy lead), across 9 distinct opponents.
+G_TRAINER_OPPONENT = 0x02038BCA
+# OBJ palette slot Emerald assigns the OPPONENT trainer front-pic during the intro. VALIDATED on the
+# corpus: the enemy MON is NEVER this palette (122k frames, all pal 1) and 9 distinct opponents all
+# use it — so it cleanly separates the opening trainer pic from the enemy mon's slide-in (pal 1).
+ENEMY_TRAINER_PAL = 7
 _OAM_DIMS = {(0, 0): (8, 8), (0, 1): (16, 16), (0, 2): (32, 32), (0, 3): (64, 64),
              (1, 0): (16, 8), (1, 1): (32, 8), (1, 2): (32, 16), (1, 3): (64, 32),
              (2, 0): (8, 16), (2, 1): (8, 32), (2, 2): (16, 32), (2, 3): (32, 64)}
@@ -85,30 +98,73 @@ def _s8(v: int) -> int:
     return v - 256 if v >= 128 else v
 
 
+def _healthbox_visible(st, battler: int) -> bool:
+    """True iff `battler`'s HP box is on screen — i.e. its mon is out (see G_HEALTHBOX)."""
+    sid = st.u8(G_HEALTHBOX + battler)
+    if sid >= 64:
+        return False
+    return not ((st.u16(GSPRITES_BAT + sid * SPRITE_STRIDE + 0x3E) >> 2) & 1)
+
+
+def trainer_pic_table(rom: bytes) -> dict[int, int]:
+    """trainer id -> (trainerPic + 1), from gTrainers in ROM (0 reserved = none/non-trainer). Reuses
+    rom_manifest.scan_trainers for the validated table base + the off-by-one base-index detection."""
+    from collection.extractors.rom_manifest import Rom, scan_trainers
+    r = Rom(rom)
+    tr_base, trainers = scan_trainers(r)
+    prev = tr_base - 0x28                                       # TRAINER_NONE sits one stride back
+    base_idx = 1 if r.u32(prev + 0x20) == 0 and r.u32(prev + 0x24) == 0 else 0
+    out: dict[int, int] = {}
+    for t in trainers:
+        a = tr_base + (t["id"] - base_idx) * 0x28
+        out[t["id"]] = r.u8(a + 3) + 1                          # Trainer.trainerPic @ +0x03, +1 -> 1-based
+    return out
+
+
+def opponent_trainer_pic(st, table: dict[int, int]) -> int:
+    """The (1-based) front-pic id of the current opponent trainer, or 0 if unknown / not a trainer."""
+    return table.get(st.u16(G_TRAINER_OPPONENT), 0)
+
+
 def battle_sprites(st) -> list[dict]:
-    """On-screen battler MON sprites for the spatial species-splat. For each battler whose sprite is
-    VISIBLE (mon actually out — not the pre-throw intro): species (gBattleMons) + role + screen
-    top-left px + size px. Empty when no battle / mons not out. (Trainer-sprite identity is a
-    separate follow-up.) Top-left = pos1(+0x20) + pos2(+0x24) + centerToCornerVec(s8 +0x28/+0x29)."""
+    """On-screen battle sprites for the spatial splat. Two kinds, distinguished per frame:
+      • MON (kind 1=player / 2=enemy): the gBattlerSpriteIds sprite of a battler whose HP box is up
+        (mon is out) -> gBattleMons species. In a WILD battle (no intro) we keep the historical
+        behaviour and emit the mon whenever its sprite is on screen; in a TRAINER battle we REQUIRE
+        the healthbox, so the intro trainer pic (which occupies the SAME slot before send-out) is
+        never mislabeled as the mon.
+      • TRAINER (kind 3): during a trainer-battle opening the opponent's slot holds the trainer FRONT
+        pic, not a mon. We emit it (species 0; identity carried by bat_sprite_trainer downstream),
+        positively identified by the opponent OBJ palette so the enemy mon's slide-in is excluded.
+        The player BACK pic is left unconditioned (brief, identical every battle, and its palette
+        collides with the player mon's — the overworld conditioning already carries the avatar).
+    Top-left = pos1(+0x20) + pos2(+0x24) + centerToCornerVec(s8 +0x28/+0x29)."""
     if not in_battle(st):
         return []
+    trainer_batt = bool(st.u32(G_BATTLE_TYPE) & 0x08)
     out = []
     for battler in range(N_BATTLERS):
         sid = st.u8(G_BATTLER_SPRITE_IDS + battler)
         if sid >= 64:
             continue
         base = GSPRITES_BAT + sid * SPRITE_STRIDE
-        if (st.u16(base + 0x3E) >> 2) & 1:                 # invisible -> mon not on screen yet
-            continue
-        species = st.u16(G_BATTLE_MONS + battler * MON_SIZE)
-        if not (0 < species <= MAX_SPECIES):
+        if (st.u16(base + 0x3E) >> 2) & 1:                 # invisible -> sprite not on screen
             continue
         w, h = _OAM_DIMS.get(((st.u16(base) >> 14) & 3, (st.u16(base + 2) >> 14) & 3), (64, 64))
         x = st.s16(base + 0x20) + st.s16(base + 0x24) + _s8(st.u8(base + 0x28))
         y = st.s16(base + 0x22) + st.s16(base + 0x26) + _s8(st.u8(base + 0x29))
         if not (w >= 32 and h >= 32 and -w < x < 240 and -h < y < 160):
             continue                                       # reject uninitialized opening-wipe frames
+        if trainer_batt and not _healthbox_visible(st, battler):
+            pal = (st.u16(base + 0x04) >> 12) & 0xF
+            if battler % 2 == 1 and pal == ENEMY_TRAINER_PAL:    # opponent trainer FRONT pic
+                out.append({"battler": battler, "species": 0, "kind": 3,
+                            "x": x, "y": y, "w": w, "h": h})
+            continue                                        # player-back / mon slide-in -> skip
+        species = st.u16(G_BATTLE_MONS + battler * MON_SIZE)
+        if not (0 < species <= MAX_SPECIES):
+            continue
         out.append({"battler": battler, "species": species,
-                    "kind": 1 if battler == 0 else 2,       # 1=player-mon, 2=enemy-mon (singles)
+                    "kind": 1 if battler % 2 == 0 else 2,       # 1=player-mon, 2=enemy-mon
                     "x": x, "y": y, "w": w, "h": h})
     return out

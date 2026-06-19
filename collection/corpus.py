@@ -19,7 +19,7 @@ import argparse
 import json
 from pathlib import Path
 
-SCHEMA_VERSION = 2          # version of the recorded-run/conditions schema (pokemon-worldmodel docs/STRUCTURE.md §3)
+SCHEMA_VERSION = 4          # v4: + bat_sprite_trainer (opponent trainer-pic identity; the battle-opening conditioning gap) (docs/STRUCTURE.md §3)
 
 
 def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:

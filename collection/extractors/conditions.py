@@ -13,6 +13,7 @@ Per-run npz schema (N = frames):
   text_state u8 (0 none / 1 typing / 2 finished-box) · text_id i32 · text_reveal u16 (+ texts json)
   bat_valid (N,4) u8 · bat_species u16 · bat_level u8 · bat_hp,bat_maxhp u16 · bat_status u32
   bat_moves (N,4,4) u16 · bat_pp (N,4,4) u8 · bat_type u32 · bat_comm (N,8) u8
+  bat_sprite_{valid,species,trainer,kind,screen,size} (N,4,..) · glyph_grid (N,40,60) u8 · hp_fill (N,20,30) f32
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.extractors.battle import battle_sprites, battle_state, in_battle
+from collection.extractors.battle import (battle_sprites, battle_state, in_battle,
+                                           opponent_trainer_pic, trainer_pic_table)
 from collection.extractors.entities import DIRECTIONS, camera_px, entities, player_state
+from collection.extractors.glyph import glyph_grid, hp_fill_grid
 from collection.extractors.ram import GBAState, iter_states
 from collection.extractors.terrain import terrain
 from collection.extractors.text import last_message, text_state
@@ -44,6 +47,12 @@ class RunConditionWriter:
         self.texts: dict[str, int] = {}      # string -> id
         self.grids: list[np.ndarray] = []
         self._grid_hash: dict[bytes, int] = {}
+        self._tpics: dict[int, int] | None = None    # trainer id -> pic+1 (lazy; needs ROM)
+
+    def _trainer_pics(self) -> dict[int, int]:
+        if self._tpics is None:
+            self._tpics = trainer_pic_table(self.rom) if self.rom else {}
+        return self._tpics
 
     def _text_id(self, s: str) -> int:
         if s not in self.texts:
@@ -134,11 +143,18 @@ class RunConditionWriter:
         # in off-screen), size px. See battle.battle_sprites (gBattlerSpriteIds, validated).
         K = 4
         bsv = np.zeros(K, np.uint8); bssp = np.zeros(K, np.uint16); bskd = np.zeros(K, np.uint8)
+        bstr = np.zeros(K, np.uint8)                              # trainer pic+1 (kind-3 slots only)
         bsscr = np.zeros((K, 2), np.int16); bssz = np.zeros((K, 2), np.uint8)
         for j, d in enumerate(battle_sprites(st)[:K]):
             bsv[j] = 1; bssp[j] = d["species"]; bskd[j] = d["kind"]
+            if d["kind"] == 3:                                   # opponent trainer pic -> identity
+                bstr[j] = opponent_trainer_pic(st, self._trainer_pics())
             bsscr[j] = (d["x"], d["y"]); bssz[j] = (d["w"], d["h"])
-        r["bat_sprite"] = (bsv, bssp, bskd, bsscr, bssz)
+        r["bat_sprite"] = (bsv, bssp, bstr, bskd, bsscr, bssz)
+        # identity_grounded glyph grid (40x60 @4px, charmap id per sub-cell) + HP-bar fill (20x30).
+        # ALL on-screen text/numbers (dialogue/HUD/menu) + the HP bar, spatially grounded. See glyph.py.
+        r["glyph"] = glyph_grid(st, self.rom)
+        r["hp_fill"] = hp_fill_grid(st)
         return r
 
     def _merge_streamed_texts(self) -> tuple[list[str], dict[int, tuple[int, int]]]:
@@ -194,10 +210,12 @@ class RunConditionWriter:
                      "bat_moves", "bat_pp")
         for i, nm in enumerate(bat_names):
             arrs[nm] = np.stack([r["bat"][i] for r in R])
-        bs_names = ("bat_sprite_valid", "bat_sprite_species", "bat_sprite_kind",
-                    "bat_sprite_screen", "bat_sprite_size")          # identity_grounded
+        bs_names = ("bat_sprite_valid", "bat_sprite_species", "bat_sprite_trainer",
+                    "bat_sprite_kind", "bat_sprite_screen", "bat_sprite_size")  # identity_grounded
         for i, nm in enumerate(bs_names):
             arrs[nm] = np.stack([r["bat_sprite"][i] for r in R])
+        arrs["glyph_grid"] = np.stack([r["glyph"] for r in R])       # (N,40,60) u8  identity_grounded
+        arrs["hp_fill"] = np.stack([r["hp_fill"] for r in R])        # (N,20,30) f32
         for k, g in enumerate(self.grids):
             arrs[f"grid_{k}"] = g
         out.parent.mkdir(parents=True, exist_ok=True)
