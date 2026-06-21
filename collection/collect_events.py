@@ -170,6 +170,20 @@ def _party_all_full(current) -> bool:
     return all((m.get("hp") or 0) >= (m.get("max_hp") or 0) > 0 for m in party) if party else True
 
 
+def _lead_at_level(state, min_level: int) -> bool:
+    """Party LEAD (slot 0) is at least `min_level` — STARTER-AGNOSTIC. The grind/postcondition gates
+    were written against "Mudkip" (the original playthrough's starter); for alt-starter collection
+    (Treecko/Torchic) we gate on the lead's level regardless of species. Backward-compatible: when the
+    lead IS Mudkip this is identical to the old species check."""
+    party = state.party_summary or []
+    if not party or not isinstance(party[0], dict):
+        return False
+    try:
+        return int(party[0].get("level") or 0) >= min_level
+    except (TypeError, ValueError):
+        return False
+
+
 # Events that own their own Pokémon-Center flow (entering, healing, exiting). The
 # generic heal detour must stay out of their way, or it fights their navigation.
 _HEAL_OWNING_EVENT = ("CENTER", "HEAL")
@@ -251,7 +265,7 @@ def _grind_target(event_id: str | None, current) -> int | None:
     already hold and the level is the lone thing missing (so we don't grind before
     actually reaching/beating the gate). None means "don't grind"."""
     target = _EVENT_GRIND_LEVEL.get(event_id or "")
-    if target is None or _party_has_species_level(current, "Mudkip", target):
+    if target is None or _lead_at_level(current, target):     # starter-agnostic (was hardcoded Mudkip)
         return None
     if event_id == "MAY_ROUTE103_INTERACTION":
         # Grind up FIRST (the rival's Treecko is super-effective vs Mudkip, a coin
@@ -286,7 +300,7 @@ def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunn
             and not current.dialogue
             and not _visible_dialog_open(runner)
             and (current.money or 0) >= 3300
-            and _party_has_species_level(current, "Mudkip", 7)
+            and _lead_at_level(current, 7)                     # starter-agnostic (was hardcoded Mudkip)
         )
     if event_id == "ROUTE_104_SOUTH":
         # The completed checkpoint is corrupt and the milestone is pre-marked, so the
