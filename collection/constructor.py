@@ -116,6 +116,7 @@ class RomTables:
         self.base_stats = self._find_base_stats()
         self.exp_tables = self._find_exp_tables()
         self.species_names = self._find_species_names()
+        self.learnsets = self._find_learnsets()
 
     def _u(self, off, n):
         return int.from_bytes(self.rom[off:off + n], "little")
@@ -189,6 +190,44 @@ class RomTables:
         raw = self.rom[self.species_names + species * 11:][:11]
         return raw[:raw.index(0xFF) + 1] if 0xFF in raw else raw
 
+    def _learnset(self, off: int) -> list[tuple[int, int]]:
+        """Decode a Gen-3 level-up learnset: u16 entries (level<<9 | move), 0xFFFF-terminated."""
+        out = []
+        while off + 2 <= len(self.rom):
+            e = self._u(off, 2)
+            if e == 0xFFFF:
+                break
+            out.append((e >> 9, e & 0x1FF)); off += 2
+            if len(out) > 50:
+                break
+        return out
+
+    def _find_learnsets(self) -> int:
+        """gLevelUpLearnsets pointer table — found by scan + VALIDATED on recorded/known data (trust
+        rule): ptr[MUDKIP] must decode to a learnset whose FIRST move is Tackle (33), and a sample of
+        species indices must be valid ROM pointers. (Emerald US: 0x0832937C; Mudkip's L<=16 learnset =
+        Tackle/Growl/Mud-Slap/Water Gun — the exact moveset the contaminated wild leads carried.)"""
+        N = len(self.rom)
+        ptr = lambda b, s: self._u(b + s * 4, 4)
+        ok = lambda p: 0x08000000 <= p < 0x08000000 + N
+        for base in range(0x300000, 0x360000, 4):
+            p = ptr(base, MUDKIP)
+            if not ok(p):
+                continue
+            ls = self._learnset(p - 0x08000000)
+            if ls and ls[0][1] == 33 and all(ok(ptr(base, s)) for s in (1, 277, 280, 283, 300, 400)):
+                return base
+        raise AssertionError("gLevelUpLearnsets scan failed")
+
+    def moveset_at_level(self, species: int, level: int) -> list[int]:
+        """The natural moveset a mon HAS at `level` = the (up to) 4 most-recently learned level-up
+        moves with learn-level <= level — the game's own assignment. set_party_slot uses this when
+        `moves` is omitted, so a constructed mon can NEVER silently keep the base clone's moves (the
+        moveset-contamination bug that taught alt-starters Mudkip's moves; PLAN §8.4)."""
+        p = self._u(self.learnsets + species * 4, 4) - 0x08000000
+        moves = [m for lv, m in self._learnset(p) if lv <= level and 0 < m < 355]
+        return moves[-4:]
+
 
 # ---- the constructor -----------------------------------------------------------------------------
 
@@ -257,6 +296,8 @@ class StateConstructor:
     def set_party_slot(self, slot: int, species: int, level: int,
                        moves: list[int] | None = None, near_levelup: bool = False) -> None:
         st = self._st()
+        if moves is None:                       # NEVER silently keep the clone's moves (PLAN §8.4):
+            moves = self.tables.moveset_at_level(species, level)   # the species' real level-up moveset
         addr = G_PLAYER_PARTY + slot * 100
         mon = bytearray(st.bytes(addr, 100))
         d = decrypt_box(bytes(mon[:80]))
