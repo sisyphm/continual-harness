@@ -23,7 +23,7 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.extractors.battle import (battle_sprites, battle_state, in_battle,
+from collection.extractors.battle import (G_CURRENT_MOVE, battle_sprites, battle_state, in_battle,
                                            opponent_trainer_pic, trainer_pic_table)
 from collection.extractors.entities import DIRECTIONS, camera_px, entities, player_state
 from collection.extractors.glyph import glyph_grid, hp_fill_grid
@@ -138,6 +138,8 @@ class RunConditionWriter:
                 bhp[s], bmx[s], bst[s] = bt.hp, bt.max_hp, bt.status1
                 bmv[s] = bt.moves; bpp[s] = bt.pp
         r["bat"] = (bv, bs, blv, bhp, bmx, bst, bmv, bpp, btype, np.frombuffer(bcomm, np.uint8))
+        cm = st.u16(G_CURRENT_MOVE) if b is not None else 0      # acting move (skill-motion identity, v5)
+        r["bat_current_move"] = cm if 0 <= cm < 355 else 0
         # identity_grounded: on-screen battler MON sprites for the spatial species-splat (K=4 slots,
         # enumeration order; `kind` 1=player-mon 2=enemy-mon). Screen px (s16; negative when sliding
         # in off-screen), size px. See battle.battle_sprites (gBattlerSpriteIds, validated).
@@ -201,6 +203,7 @@ class RunConditionWriter:
             "text_reveal": np.array([r["text"][2] for r in R], np.uint16),
             "bat_type": np.array([r["bat"][8] for r in R], np.uint32),
             "bat_comm": np.stack([r["bat"][9] for r in R]),
+            "bat_current_move": np.array([r["bat_current_move"] for r in R], np.uint16),
         }
         ent_names = ("ent_valid", "ent_gfx", "ent_local", "ent_facing", "ent_moving", "ent_mvt",
                      "ent_xy", "ent_screen")

@@ -75,6 +75,12 @@ def battle_state(st: GBAState) -> dict | None:
 # (sp286), positions match the on-screen mons AND their HP boxes; slot reallocation (enemy 3->4->6) is
 # followed; the gSprites `invisible` flag (byte 0x3E bit 2) is the mon-is-out signal.
 G_BATTLER_SPRITE_IDS = 0x020241E4
+# gCurrentMove @ 0x020241EC (u16) — the ACTING battler's move (cycles through both sides' moves as
+# turns alternate). VALIDATED 2026-06-22 on a recorded Torchic-vs-Roxanne battle (player-distinctive
+# EMBER): at the top-3% ΔRGB frames (the actual move animations) it holds a valid move 100% of the
+# time, and exactly the animating moves (Ember/Scratch/Double-Kick/Peck/Rock-Tomb/…). Used to condition
+# WHICH move's animation is playing (identity_grounded v5 skill-motions, PLAN §8.4).
+G_CURRENT_MOVE = 0x020241EC
 GSPRITES_BAT, SPRITE_STRIDE = 0x02020630, 0x44      # struct Sprite (pokeemerald): see offsets below
 # gHealthboxSpriteIds @ 0x03005D70 (u8[4]) — battler -> its HP-box sprite. The HP box is created and
 # made visible only once that battler's MON is on the field (sent out), so "healthbox visible" is the
