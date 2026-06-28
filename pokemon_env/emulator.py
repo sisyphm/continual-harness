@@ -424,6 +424,33 @@ class EmeraldEmulator:
             "r": lib.GBA_KEY_R
         }
 
+    def _install_fixed_rtc_from_env(self):
+        """Install a fixed mGBA RTC source for deterministic world-model collection.
+
+        Pokemon Emerald can read cartridge RTC hardware. Raw mGBA savestate bytes plus
+        buttons are not long-horizon deterministic if the RTC follows wall-clock time,
+        so world-model collection fixes RTC by default. Set POKEMON_WM_FIXED_RTC=0
+        to opt out, and POKEMON_WM_RTC_VALUE=<int> to choose the fixed value.
+        """
+        raw_enabled = os.environ.get("POKEMON_WM_FIXED_RTC")
+        if raw_enabled is not None and raw_enabled.strip().lower() in {"0", "false", "no", "off"}:
+            logger.info("Fixed mGBA RTC disabled by POKEMON_WM_FIXED_RTC")
+            return False
+        raw_value = os.environ.get("POKEMON_WM_RTC_VALUE", "0")
+        try:
+            value = int(raw_value, 0)
+        except ValueError as e:
+            raise RuntimeError(f"Invalid POKEMON_WM_RTC_VALUE={raw_value!r}") from e
+        rtc = ffi.new("struct mRTCGenericSource *")
+        lib.mRTCGenericSourceInit(rtc, self.core._core)
+        rtc.override = lib.RTC_FIXED
+        rtc.value = value
+        lib.mCoreSetRTC(self.core._core, ffi.addressof(rtc, "d"))
+        self._pokemon_wm_fixed_rtc = rtc
+        self._pokemon_wm_fixed_rtc_value = value
+        logger.info(f"Fixed mGBA RTC installed for deterministic world-model collection (value={value})")
+        return True
+
     def initialize(self):
         """Load ROM and set up emulator"""
         try:
@@ -453,6 +480,7 @@ class EmeraldEmulator:
             self.video_buffer = mgba.image.Image(self.width, self.height)
             self.core.set_video_buffer(self.video_buffer)
             self.core.reset()  # Reset after setting video buffer
+            self._install_fixed_rtc_from_env()
 
             # Initialize memory reader with milestone tracker for progress-based features
             self.memory_reader = PokemonEmeraldReader(self.core, milestone_tracker=self.milestone_tracker)
