@@ -1,9 +1,17 @@
 """Entities (player + NPCs) — the corrected `gObjectEvents` extractor.
 
-Phase-0 established the TRUE layout for this build (validated against live frames; the legacy
-`world_model_sink.extract_objects` used stride 68 / gfx@+0x03 and produced garbage dataset-wide):
+Phase-0 established the TRUE record layout for this build (validated against live frames; the
+legacy `world_model_sink.extract_objects` used stride 68 / gfx@+0x03 and produced garbage
+dataset-wide). BASE CORRECTION (2026-07-02): Phase-0's base 0x02037230 was **8 slots (0x120)
+low** — it probed 8 phantom slots inside `sBackupMapData`'s tail (always filtered by the
+structural validity check; no phantoms observed corpus-wide) and could NOT see true slots 8–15,
+so real NPCs were missing from conditions on busy maps (e.g. Rustboro: an NPC absent from
+conditions on ~44% of sampled tour frames). The true base 0x02037350 is the SHA-exact decomp
+catalog address, verified empirically (player record at true slot 0, coords == saveblock).
+Conditions extracted BEFORE this fix under-report entities: re-extract
+(`precompute_conditions --force`) and re-train the renderer at the next collection round.
 
-    gObjectEvents @ 0x02037230 — 16 records × 0x24 (36) bytes (pokeemerald `struct ObjectEvent`):
+    gObjectEvents @ 0x02037350 — 16 records × 0x24 (36) bytes (pokeemerald `struct ObjectEvent`):
       +0x00  u32  bitfield        (bit0 NOT usable as `active`: 0xFF-cleared slots read 1)
       +0x04  u8   spriteId
       +0x05  u8   graphicsId      (the identity the model learns appearance for)
@@ -31,7 +39,7 @@ from dataclasses import dataclass
 
 from collection.extractors.ram import GBAState
 
-OBJ_BASE, OBJ_SIZE, OBJ_N = 0x02037230, 0x24, 16
+OBJ_BASE, OBJ_SIZE, OBJ_N = 0x02037350, 0x24, 16   # true gObjectEvents (base corrected 2026-07-02)
 SAVEBLOCK1_PTR = 0x03005D8C            # iwram pointer -> SaveBlock1 (DMA-shifted; validated Phase 0)
 PLAYER_LOCALID = 0xFF
 MAP_OFFSET = 7                         # object coords carry the border offset; player saveblock doesn't
@@ -78,8 +86,13 @@ class Entity:
 
 
 def _valid(st: GBAState, o: int) -> bool:
-    """Structural slot validity (Phase-0 rule): not 0xFF-cleared, plausible gfx, sane coords."""
-    if st.u8(o) == 0xFF:
+    """Slot validity at the TRUE base (2026-07-02): the decomp `ObjectEvent.active` bit (bit0 of
+    the leading u32 bitfield) IS trustworthy here — the old "bit0 unusable" Phase-0 rule was an
+    artifact of probing `sBackupMapData` bytes at the shifted base. The active gate is required:
+    despawned NPCs keep plausible bytes (ghost splats under the structural-only rule — observed:
+    Rustboro stale slots), and zero-cleared slots fake the player pattern (gfx=0, local=0xFF).
+    Structural sanity kept as belt-and-braces."""
+    if not (st.u32(o) & 1):                                 # ObjectEvent.active
         return False
     gfx = st.u8(o + 0x05)
     if not (0 <= gfx <= 239):
