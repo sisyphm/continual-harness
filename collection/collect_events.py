@@ -130,6 +130,17 @@ def _persist_frame(event_output: Path, stem: str, runner: DirectEmulatorRunner) 
     return {"path": path.name, "path_4x": path_4x.name, "size": list(image.size)}
 
 
+# Run-configured starter species; the STARTER_CHOSEN gate holds this exact species
+# (a wrong pick must fail loud, not pass on position). Default "Mudkip" ⇒ the original
+# single-starter behavior is byte-identical. The playthrough director sets this.
+EXPECTED_STARTER = "Mudkip"
+
+
+def set_expected_starter(species: str) -> None:
+    global EXPECTED_STARTER
+    EXPECTED_STARTER = species
+
+
 def _party_has_species_level(state, species: str, min_level: int) -> bool:
     wanted = species.lower()
     for member in state.party_summary or []:
@@ -258,14 +269,27 @@ def _may_heal_needed(current, may_state: dict) -> bool:
 # Story gates that require the starter to be a certain level. We grind the route's
 # grass up to this level once the rest of the gate is satisfied (e.g. rival beaten).
 _EVENT_GRIND_LEVEL = {"MAY_ROUTE103_INTERACTION": 7}
+# Torchic (fire) is resisted by Roxanne's rock types; it must evolve to Combusken
+# (L16, gaining Double Kick — 2x super-effective) to win. Grind on the last grass
+# before Rustboro (Petalburg Woods). Mudkip/Treecko don't need this.
+_TORCHIC_GYM_GRIND = 16
 
 
 def _grind_target(event_id: str | None, current) -> int | None:
     """Return the level to grind Mudkip to, only when the gate's *other* conditions
     already hold and the level is the lone thing missing (so we don't grind before
     actually reaching/beating the gate). None means "don't grind"."""
-    target = _EVENT_GRIND_LEVEL.get(event_id or "")
-    if target is None or _lead_at_level(current, target):     # starter-agnostic (was hardcoded Mudkip)
+    if event_id != "PETALBURG_WOODS":
+        target = _EVENT_GRIND_LEVEL.get(event_id or "")
+        if target is None or _lead_at_level(current, target):
+            return None
+    if event_id == "PETALBURG_WOODS":
+        lead = (getattr(current, "party_summary", None) or [{}])[0]
+        sp = str(lead.get("species", "")).lower()
+        if sp in ("torchic",) and not _lead_at_level(current, _TORCHIC_GYM_GRIND):
+            if (current.map == "PETALBURG WOODS" and not current.in_battle
+                    and not current.dialogue):
+                return _TORCHIC_GYM_GRIND
         return None
     if event_id == "MAY_ROUTE103_INTERACTION":
         # Grind up FIRST (the rival's Treecko is super-effective vs Mudkip, a coin
@@ -286,7 +310,7 @@ def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunn
         # rescue battle. The saved checkpoint sits on a script tail (Birch then walks
         # you to the lab), so a responsive position match would miss this window.
         return (
-            _party_has_species_level(current, "Mudkip", 1)
+            _party_has_species_level(current, EXPECTED_STARTER, 1)
             and current.control_mode == "free_overworld"
             and not current.in_battle
             and not current.dialogue
@@ -347,7 +371,7 @@ def _postcondition_met(
     # was otherwise re-read here every call (twice per action).
     if current is None:
         current = runner.state()
-    if event_id == "STARTER_CHOSEN" and not _party_has_species_level(current, "Mudkip", 1):
+    if event_id == "STARTER_CHOSEN" and not _party_has_species_level(current, EXPECTED_STARTER, 1):
         # The starter pick is only complete when we actually hold Mudkip; a wrong
         # starter (e.g. Torchic) must fail loudly instead of passing on position alone.
         return False

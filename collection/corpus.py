@@ -37,6 +37,13 @@ def discover_runs(data_root: Path) -> list[tuple[str, Path, str]]:
         for d in sorted(beh.iterdir()):
             if (d / "semantic.jsonl").exists():
                 runs.append((d.name, d, "behavior"))
+    pt = data_root / "playthroughs"
+    if pt.exists():
+        for d in sorted(pt.glob("playthrough__*")):
+            # gate-quarantined runs live under _quarantine/ and are skipped by the glob;
+            # name drops the kind prefix so run_key == the dir name (kind__name convention)
+            if d.is_dir() and (d / "semantic.jsonl").exists():
+                runs.append((d.name.removeprefix("playthrough__"), d, "playthrough"))
     return runs
 
 

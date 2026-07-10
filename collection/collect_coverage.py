@@ -127,7 +127,16 @@ def collect_coverage(*, load_state, output_dir, rom_path, backend, max_step_fram
         sink = WorldModelSink(out)
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=load_state, story_bucket=story_bucket,
                                       recorder=rec, emulator_fps=60, frame_hook=sink.capture)
-        runner.initialize(); sink.capture(runner); runner.settle_to_free_overworld()
+        runner.initialize(); sink.capture(runner)
+        # Frame-0 savestate for the savestate-Markov corpus builder: it loads initial.state and applies
+        # actions.npy[i] to step frame i->i+1, so initial.state must be the state BEFORE the first recorded
+        # action. The recorder logs its first action on the first step_frame (which happens inside settle),
+        # while initialize() records frame 0 with no action -- so the frame-0 state is here, pre-settle.
+        # (Mirrors collect_events.py's initial.state; makes coverage runs ingestable by the savestate builder.)
+        _init_sb = runner.save_state_bytes()
+        if _init_sb is not None:
+            (out / "initial.state").write_bytes(_init_sb)
+        runner.settle_to_free_overworld()
         start_bytes = runner.save_state_bytes(); start_facing = runner.facing
         stats = {"battles": 0}
         visited = {start}; failed: set = set(); pos = [start]
@@ -229,6 +238,7 @@ def collect_coverage(*, load_state, output_dir, rom_path, backend, max_step_fram
             return start, start_bytes, start_facing           # fallback (shouldn't happen pre-100%)
 
         greedy()
+        clip_seeds_dir = out / "clip_seeds"; clip_seeds_dir.mkdir(exist_ok=True)   # per-clip seed savestate -> byte-exact per-clip replay
         stall = 0; banned: set = set()
         # One-way ledges strand the walker -> each reset starts a fresh clip near the nearest unvisited
         # pocket. A no-progress reset bans that checkpoint for the round (so we try the next-nearest);
@@ -241,6 +251,7 @@ def collect_coverage(*, load_state, output_dir, rom_path, backend, max_step_fram
             runner.facing = fac; pos[0] = tile
             failed.clear()                                       # NPCs respawn -> retry blocked edges
             clip_starts.append(runner.frame_idx)
+            clip_seeds_dir.joinpath(f"{runner.frame_idx}.state").write_bytes(sb)   # this clip's seed = the loaded checkpoint
             greedy()
             if len(visited) == before:                           # no new tiles this clip
                 banned.add(tile); stall += 1

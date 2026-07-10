@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import copy
 import importlib.util
 import json
@@ -284,24 +285,29 @@ def _dialog_text_lower(state: dict[str, Any]) -> str:
     return text.replace("�", " ").lower()
 
 
-def _is_mudkip_nickname_prompt(state: dict[str, Any]) -> bool:
+def _target_starter(state: dict[str, Any]) -> str:
+    """Run-configured starter to pick; default 'mudkip' ⇒ original behavior unchanged."""
+    return str(state.get("_target_starter") or "mudkip").lower()
+
+
+def _is_starter_nickname_prompt(state: dict[str, Any]) -> bool:
     text = _dialog_text_lower(state)
-    return "nickname" in text and "mudkip" in text
+    return "nickname" in text and _target_starter(state) in text
 
 
-def _mudkip_nickname_action(state: dict[str, Any]) -> str:
+def _starter_nickname_action(state: dict[str, Any]) -> str:
     if _visual_yes_no_prompt(state.get("_env")):
-        state["_ui_mudkip_nickname_decline_active"] = True
-    if state.get("_ui_mudkip_nickname_decline_active"):
-        return _next_sequence_action(state, "_ui_mudkip_nickname_decline_step", ("down", "down", "a"), repeat_last=True)
+        state["_ui_starter_nickname_decline_active"] = True
+    if state.get("_ui_starter_nickname_decline_active"):
+        return _next_sequence_action(state, "_ui_starter_nickname_decline_step", ("down", "down", "a"), repeat_last=True)
     return "a"
 
 
 def _guidance_action(state: dict[str, Any], action_guidance: str) -> str:
     guidance = action_guidance.lower()
     if "starter" in guidance and "mudkip" in guidance:
-        # Emerald bag screen starts on the left/middle ball in the relevant states.
-        # Right/right is harmless if already on Mudkip; then A confirms.
+        # NOTE: not the live STARTER_CHOSEN path (that uses _select_starter_action, a
+        # visual-confirm loop). Left as-is; harmless fallback for guidance-driven callers.
         return _next_sequence_action(state, "_ui_starter_mudkip_step", ("right", "right", "a", "a"), repeat_last=True)
     if "your name" in guidance or "default name" in guidance or "on-screen keyboard" in guidance:
         # START accepts the default name on the Emerald naming keyboard; A clears
@@ -328,8 +334,8 @@ def navigate_ui(state: dict[str, Any], intent: str = "confirm", action_guidance:
     if not in_battle and not dialog_open and game_state in {"", "overworld", "field", "none"}:
         return "no_op"
     if dialog_open:
-        if _is_mudkip_nickname_prompt(state):
-            return _mudkip_nickname_action(state)
+        if _is_starter_nickname_prompt(state):
+            return _starter_nickname_action(state)
         if intent == "select_no":
             return _next_sequence_action(state, "_ui_select_no_step", ("down", "a"))
         return "a"
@@ -453,11 +459,21 @@ def _battle_menu_action(state: dict[str, Any], mode: str, prefer: str | None = N
     return seq[min(step, len(seq) - 1)]
 
 
+# Per-starter super-effective move vs Roxanne (rock). Mudkip keeps water_gun
+# (regression-safe); treecko uses its grass move; torchic has NO super-effective
+# option (fire is resisted) so prefer=None -> best damaging move + a grind bump.
+_GYM_PREFER_MOVE = {"mudkip": "water_gun", "treecko": "absorb", "torchic": "double_kick"}  # Combusken@16
+
+
 def handle_battle(state: dict[str, Any], strategy: str = "fight") -> str:
     # Flee wild battles; fight trainers (unfleeable) and gym leaders. A named-move
     # strategy (e.g. "water_gun") pins that move when it has PP — needed for Roxanne.
     mode = "run" if (strategy == "run" and not _is_trainer_battle(state.get("_env"))) else "fight"
     prefer = strategy if strategy not in {"fight", "run"} else None
+    if prefer is not None:  # named-move (gym-leader) strategy -> make it starter-aware
+        starter = _target_starter(state)
+        if starter in _GYM_PREFER_MOVE:
+            prefer = _GYM_PREFER_MOVE[starter]
     return _battle_menu_action(state, mode, prefer)
 
 
@@ -824,6 +840,15 @@ def _starter_confirm_species(env: Any) -> str | None:
     if arr is None:
         return None
     r, g, b = _region_mean(arr, 108, 132, 58, 86)
+    if os.environ.get("STARTER_RGB"):
+        import sys as _sys
+        print(f"[confirm_rgb] r={r:.0f} g={g:.0f} b={b:.0f}", file=_sys.stderr)
+    # Confirm-circle dominant colour (ORIGINAL, mudkip-reliable thresholds). NOTE: the
+    # treecko/torchic rules here are NOT verified against real confirm frames — the
+    # green rule collides with Route-101 grass (S2 finding: every "treecko" read during
+    # an alt-starter run was the grass rescue scene, not the ball confirm). Alt-starter
+    # selection is a KNOWN BLOCKER pending real confirm-screen colour capture; mudkip
+    # (default) is unaffected and byte-identical.
     if b >= 175 and b > r + 15:
         return "mudkip"
     if r >= 195 and r > b + 40:
@@ -831,6 +856,9 @@ def _starter_confirm_species(env: Any) -> str | None:
     if g >= 140 and b < 130 and r < 185:
         return "treecko"
     return None
+
+
+_STARTER_ORDER = ("treecko", "torchic", "mudkip")  # bag left→right (Mudkip rightmost: its right,right works)
 
 
 def _select_starter_action(state: dict[str, Any]) -> str:
@@ -842,17 +870,40 @@ def _select_starter_action(state: dict[str, Any]) -> str:
     on any other starter, and otherwise step right toward the Mudkip ball.
     """
     env = state.get("_env")
+    target = _target_starter(state)  # 'mudkip' (default) | 'treecko' | 'torchic'
     species = _starter_confirm_species(env)
-    if species == "mudkip":
-        return "a"  # cursor defaults to YES on the confirm prompt
-    if species in ("torchic", "treecko"):
-        return "b"  # wrong starter -> cancel back to ball selection
-    # Ball-selection screen (or lead-in text): alternate right then A so we land
-    # on the right-hand Mudkip ball and open its confirm. Alternating is robust to
-    # a dropped directional input (the confirm check above catches a wrong pick).
-    step = _as_int(state.get("_ui_starter_step")) or 0
-    state["_ui_starter_step"] = (step + 1) % 2
-    return "right" if step == 0 else "a"
+    if os.environ.get("STARTER_DEBUG"):
+        import sys as _sys
+        print(f"[starter] target={target} confirm_species={species}", file=_sys.stderr)
+    order = _STARTER_ORDER  # treecko(0), torchic(1), mudkip(2) left->right
+    tgt_idx = order.index(target)
+    if species == target:
+        state["_ui_confirm_seen"] = None
+        return "a"  # target's confirm up; YES
+    if species in order and species != target:
+        # A different starter's confirm is up -> remember which, cancel, then step toward target.
+        state["_ui_confirm_seen"] = order.index(species)
+        return "b"
+    # Ball-select / transition. If we last saw a confirm, move toward target from there.
+    seen = state.get("_ui_confirm_seen")
+    phase = _as_int(state.get("_ui_starter_step")) or 0
+    if seen is not None:
+        if seen < tgt_idx:
+            move = "right"
+        elif seen > tgt_idx:
+            move = "left"
+        else:
+            move = None  # aligned; press A to open target confirm
+        # alternate move/A so the cursor settles then opens
+        state["_ui_starter_step"] = (phase + 1) % 2
+        if move is None:
+            return "a"
+        # step once toward target then clear 'seen' so we re-open & re-check
+        state["_ui_confirm_seen"] = tgt_idx if abs(seen-tgt_idx)==1 else (seen+ (1 if move=="right" else -1))
+        return move if phase == 0 else "a"
+    # No confirm seen yet: open one to learn where we are.
+    state["_ui_starter_step"] = (phase + 1) % 2
+    return "a" if phase == 0 else "left"
 
 
 class HeatzPolicy:

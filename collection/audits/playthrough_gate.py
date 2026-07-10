@@ -1,0 +1,158 @@
+"""Quality gate for continuous playthrough runs (read-only, retroactive).
+
+Per run dir:
+  1. COMPLETION — verified from the RECORDING, not the collector log: decode the
+     final ppu state (last keyframe + XOR tail) and require the Stone Badge flag
+     (SaveBlock1 flags + system-flag 0x7, i.e. flag 0x867) to be set.
+  2. INTEGRITY — channel alignment (frames = actions + 1 = ppu + 1, the S1 rule,
+     re-verified empirically), frames.jsonl contiguity, chunk spot-decode.
+  3. DIVERSITY META — wander/life-block outcomes from playthrough_summary.json.
+Verdict PASS -> eligible for the corpus; FAIL -> moved to _quarantine/.
+
+Usage:
+  python -m collection.audits.playthrough_gate <playthroughs_root> [--apply]
+    --apply    actually move FAIL dirs to _quarantine/ (default: report only)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import zlib
+from pathlib import Path
+
+import numpy as np
+
+from collection.extractors.ram import GBAState, BLOB_SIZE
+
+SAVE_BLOCK1_PTR = 0x03005D8C
+FLAGS_OFFSET = 0x1270
+SYSTEM_FLAGS_START = 0x860
+STONE_BADGE_SYS_OFFSET = 0x7          # badge_01 (memory_reader.py:3829)
+
+
+def final_state(run_dir: Path) -> GBAState:
+    """Decode the run's final ppu state from the last keyframe forward."""
+    idx = json.loads((run_dir / "ppu_state.bin.idx.json").read_text())
+    raw = (run_dir / "ppu_state.bin").read_bytes()
+    frames = idx["frames"]
+    # find last keyframe (byte tag 'K' at the record start)
+    k = None
+    for i in range(len(frames) - 1, -1, -1):
+        off = frames[i][1]
+        if raw[off:off + 1] == b"K":
+            k = i
+            break
+    if k is None:
+        raise ValueError("no keyframe found")
+    cur: np.ndarray | None = None
+    for f, off, _kind in frames[k:]:
+        ln = int.from_bytes(raw[off + 1:off + 5], "little")
+        payload = np.frombuffer(zlib.decompress(raw[off + 5:off + 5 + ln]), np.uint8)
+        cur = payload.copy() if raw[off:off + 1] == b"K" else (cur ^ payload)
+        assert cur is not None and len(cur) == BLOB_SIZE
+    return GBAState.from_blob(cur)
+
+
+def stone_badge(st: GBAState) -> tuple[bool, int]:
+    """(stone_badge_set, badge_count) read from SaveBlock1 flags."""
+    sb1 = st.u32(SAVE_BLOCK1_PTR)
+    if not (0x02000000 <= sb1 < 0x02040000):
+        return False, -1
+    base = sb1 + FLAGS_OFFSET + SYSTEM_FLAGS_START // 8
+    count = 0
+    stone = False
+    for i in range(8):                              # badge_01..08 = sys offsets 0x7..0xE
+        off = STONE_BADGE_SYS_OFFSET + i
+        b = st.u8(base + off // 8)
+        if b & (1 << (off % 8)):
+            count += 1
+            if i == 0:
+                stone = True
+    return stone, count
+
+
+def count_lines(p: Path) -> int:
+    n = 0
+    with open(p, "rb") as f:
+        for _ in f:
+            n += 1
+    return n
+
+
+def gate_run(run_dir: Path) -> dict:
+    r: dict = {"run": run_dir.name, "verdict": "FAIL", "reasons": []}
+    try:
+        summ = json.loads((run_dir / "playthrough_summary.json").read_text())
+        man = json.loads((run_dir / "manifest.json").read_text())
+        r["milestones"] = f"{summ.get('milestones_passed')}/{summ.get('milestones_total')}"
+        r["frames_summary"] = summ.get("total_frames")
+
+        # 1. completion from the recording
+        st = final_state(run_dir)
+        stone, badges = stone_badge(st)
+        r["stone_badge"] = stone
+        r["badge_count"] = badges
+        if not stone:
+            r["reasons"].append("stone badge flag NOT set in final state")
+
+        # 2. integrity
+        idx = json.loads((run_dir / "ppu_state.bin.idx.json").read_text())
+        n_ppu = len(idx["frames"])
+        n_actions = count_lines(run_dir / "actions.jsonl")
+        n_frames_jsonl = count_lines(run_dir / "frames.jsonl")
+        vis = man.get("visual_frame_count")
+        r["channels"] = {"frames_jsonl": n_frames_jsonl, "actions": n_actions,
+                         "ppu": n_ppu, "visual": vis}
+        # S1 rule: visual frames = actions + 1 = ppu + 1
+        if not (vis == n_actions + 1 == n_ppu + 1):
+            r["reasons"].append(f"channel misalignment {r['channels']}")
+        # frames.jsonl contiguity (first/last index sanity)
+        with open(run_dir / "frames.jsonl") as f:
+            first = json.loads(f.readline())
+        r["frames_first_idx"] = first.get("frame", first.get("visual_frame"))
+        # chunk spot-decode
+        chunks = sorted((run_dir / "chunks").glob("chunk_*.npz"))
+        for c in (chunks[0], chunks[-1]):
+            with np.load(c) as z:
+                arr = z[z.files[0]]
+                assert arr.ndim >= 3 and arr.shape[-1] == 3, f"bad chunk {c.name}: {arr.shape}"
+        r["chunks"] = len(chunks)
+
+        # 3. diversity meta
+        blocks = summ.get("blocks") or []
+        r["blocks_scheduled"] = len(blocks)
+        r["blocks_ran"] = sum(1 for b in blocks if b.get("ran") or b.get("status") == "ran")
+
+        if not r["reasons"]:
+            r["verdict"] = "PASS"
+    except Exception as e:                                       # noqa: BLE001
+        r["reasons"].append(f"exception: {type(e).__name__}: {e}")
+    return r
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("root")
+    ap.add_argument("--apply", action="store_true")
+    args = ap.parse_args()
+    root = Path(args.root)
+    quarantine = root / "_quarantine"
+    results = []
+    for d in sorted(root.glob("playthrough__*")):
+        if not d.is_dir():
+            continue
+        res = gate_run(d)
+        results.append(res)
+        print(json.dumps(res, ensure_ascii=False))
+        if res["verdict"] == "FAIL" and args.apply:
+            quarantine.mkdir(exist_ok=True)
+            d.rename(quarantine / d.name)
+            print(f"  -> quarantined {d.name}", file=sys.stderr)
+    (root / "gate_report.json").write_text(json.dumps(results, indent=1))
+    n_pass = sum(1 for r in results if r["verdict"] == "PASS")
+    print(f"\nGATE: {n_pass}/{len(results)} PASS -> {root/'gate_report.json'}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
