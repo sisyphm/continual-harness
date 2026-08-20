@@ -179,21 +179,33 @@ def _visual_clock_yes_no_prompt(env: Any) -> bool:
         frame = env.get_screenshot()
         if getattr(frame, "mode", "RGB") != "RGB":
             frame = frame.convert("RGB")
-        if frame.size[0] < 230 or frame.size[1] < 130:
+        if frame.size[0] < 240 or frame.size[1] < 160:
             return False
-        # Right-side Yes/No box plus bottom text box for "Is this the correct time?"
-        box_white = all(all(channel >= 245 for channel in frame.getpixel(point)) for point in ((190, 42), (215, 70), (205, 93)))
-        text_box = all(all(channel >= 245 for channel in frame.getpixel(point)) for point in ((25, 132), (120, 132), (205, 132)))
+        # Right-side YES/NO box interior plus the bottom "Is this the correct time?"
+        # text box. Points verified against captured frames (W33 clock fix): the box
+        # sits at x~185-238, y~60-108 and the text box fills y~136-155; the previous
+        # points (y=42/70/93 box, y=132 text) never all matched a real prompt, so this
+        # predicate could never fire.
+        box_white = all(all(channel >= 245 for channel in frame.getpixel(point)) for point in ((215, 70), (190, 102), (230, 102)))
+        text_box = all(all(channel >= 245 for channel in frame.getpixel(point)) for point in ((25, 150), (120, 150), (205, 150)))
         return box_white and text_box
     except Exception:
         return False
 
 
 def _clock_confirm_action(state: dict[str, Any]) -> str:
-    # Emerald clock setup: A opens "Is this the correct time?", UP moves
-    # the cursor from NO to YES, and A confirms. Repeating the sequence is
-    # harmless if an input is dropped during the UI transition.
-    return _next_sequence_action(state, "_ui_clock_confirm_step", ("a", "up", "a"), repeat_last=False)
+    # Emerald clock setup, feedback-driven (W33 clock fix). The old blind
+    # ("a", "up", "a") counter advanced on every call whether or not the press
+    # registered. At condition-based pacing the first A landed in the clock screen's
+    # input-dead fade-in and was swallowed, phase-shifting the cycle permanently:
+    # UP moved the hands, A opened "Is this the correct time?", A confirmed the
+    # default NO — a stable loop (the W33 pilot's uniform CLOCK_INTERACT stall).
+    # Key off the visible UI state instead: no prompt -> press A (a swallowed press
+    # is simply retried); prompt open (cursor starts on NO) -> UP then A (YES).
+    if _visual_clock_yes_no_prompt(state.get("_env")):
+        return _next_sequence_action(state, "_ui_clock_confirm_step", ("up", "a"), repeat_last=True)
+    state["_ui_clock_confirm_step"] = 0
+    return "a"
 
 
 def build_heatz_state(env: Any, *, frame_idx: int, story_bucket: str, facing: str, include_map: bool = False) -> dict[str, Any]:
@@ -898,9 +910,16 @@ def _select_starter_action(state: dict[str, Any]) -> str:
         state["_ui_starter_step"] = (phase + 1) % 2
         if move is None:
             return "a"
+        if phase != 0:
+            # Settle/open probe between moves: no movement key is emitted this call,
+            # so the cursor estimate must NOT advance (W33 starter fix — advancing it
+            # here let the estimate reach the target while the real cursor lagged a
+            # ball behind; at fast pacing the premature open then hit torchic's
+            # confirm every cycle and mudkip's two-step trip wedged permanently).
+            return "a"
         # step once toward target then clear 'seen' so we re-open & re-check
-        state["_ui_confirm_seen"] = tgt_idx if abs(seen-tgt_idx)==1 else (seen+ (1 if move=="right" else -1))
-        return move if phase == 0 else "a"
+        state["_ui_confirm_seen"] = tgt_idx if abs(seen - tgt_idx) == 1 else (seen + (1 if move == "right" else -1))
+        return move
     # No confirm seen yet: open one to learn where we are.
     state["_ui_starter_step"] = (phase + 1) % 2
     return "a" if phase == 0 else "left"

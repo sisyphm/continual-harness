@@ -89,6 +89,10 @@ V2_FLOORS = {
     "level_spread": 6,             # distinct lead levels across the fleet
     "low_hp_frames": 300,          # in-battle red-bar (<= 20%) frames
     "battle_level_up": 3,          # in-battle level-up events
+    # task #46: runs whose FINAL ledger frame carries the trainer's defeated-flag
+    # (flag = 0x500 + script trainer id, empirically verified — see
+    # blocks/trainer_engagement.py); >= 2 runs per tracked trainer
+    "trainer_runs": 2,
 }
 
 # DENSITY floors: events per 1,000 block frames per phase (§4/§5.2 — "a block that
@@ -309,16 +313,29 @@ def v2_axes(run_dirs, *, change_matrix: dict | None = None,
         {"key": f"{a}<->{b}", "support": n, "ok": n >= fl["connection_pair"]}
         for (a, b), n in sorted(pair_min.items())]
 
-    # ---- ledger-derived axes (whiteouts / evolutions / levels / battle situations)
+    # ---- ledger-derived axes (whiteouts / evolutions / levels / battle situations
+    # / task #46 per-trainer engagement flags)
+    from collection.playthrough.blocks.trainer_engagement import (
+        TRACKED_TRAINER_FLAGS)
     whiteouts = 0
     evo = Counter()
     level_frames = Counter()
     low_hp = 0
     lvl_ups = 0
+    trainer_runs = Counter()
     for run in runs:
         led = v2_run_ledger(run)
         if led is None:
             continue
+        # task #46: a run supports trainer N iff its FINAL valid ledger frame has
+        # flag 0x500+N set (byte N//8, bit N%8 of the recorded flags array) — the
+        # end-of-run defeat record, exactly what the scheduler must guarantee twice
+        vi = np.flatnonzero(led["valid"] > 0)
+        if vi.size:
+            frow = led["flags"][vi[-1]]
+            for f in TRACKED_TRAINER_FLAGS:
+                if (int(frow[f // 8]) >> (f % 8)) & 1:
+                    trainer_runs[f] += 1
         whiteouts += _party_down_events(led)
         evo += _evolution_events(led)
         lead_ok = (led["valid"] > 0) & (led["species"][:, 0] > 0)
@@ -343,6 +360,12 @@ def v2_axes(run_dirs, *, change_matrix: dict | None = None,
          for lv, n in sorted(level_frames.items())]
         + [{"key": "level_spread", "support": len(level_frames),
             "ok": len(level_frames) >= fl["level_spread"]}])
+    # task #46: 18 per-trainer rows — support = runs whose final ledger frame has
+    # the flag set, floor fl["trainer_runs"]; rows exist even at zero support
+    rows["trainer_flags"] = [
+        {"key": f"tr_flag_{f:#06x}", "support": trainer_runs.get(f, 0),
+         "ok": trainer_runs.get(f, 0) >= fl["trainer_runs"]}
+        for f in TRACKED_TRAINER_FLAGS]
     rows["battle_situation"] = [
         {"key": "low_hp_bar", "support": low_hp, "ok": low_hp >= fl["low_hp_frames"]},
         {"key": "battle_level_up", "support": lvl_ups,

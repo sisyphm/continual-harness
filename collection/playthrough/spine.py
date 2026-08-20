@@ -9,12 +9,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from collection.actions import normalize_action
+from collection.actions import ActionTiming, normalize_action
 from collection.heatz_adapter import (
     HeatzPolicy, build_heatz_state, grind_action, heal_action, may_heal_action,
     _starter_ui_active,
 )
 import collection.collect_events as ce
+
+
+# W33 special-UI fix (clock + starter bag): inside these screens the pacing settle
+# predicate is blind (nothing the nav snapshot watches ever changes there), so
+# condition pacing floors every tap at ~8 frames and outruns the UI's
+# fade-ins/confirm transitions (proven wedges: CLOCK_INTERACT's confirm cycle,
+# STARTER_CHOSEN's mudkip cursor trip). Actions taken while one of these UIs is on
+# screen use the pre-W33 fixed schedule instead — scoped to the flagged UIs, never
+# a global slowdown.
+_SPECIAL_UI_TIMING = ActionTiming(hold_frames=12, release_frames=48)
 
 
 def run_milestone(
@@ -91,6 +101,14 @@ def run_milestone(
         if may_healing:
             healing = False
         visible_dialog = ce._visible_dialog_open(runner)
+        clock_ui = ce._visual_clock_ui(runner.env)
+        starter_ui = event_id == "STARTER_CHOSEN" and _starter_ui_active(runner.env)
+        # Conservative pacing only inside the flagged special UIs; the starter gate
+        # additionally requires pre-pick out-of-battle state so the rescue battle's
+        # (equally white) text box never slows normal battle handling.
+        special_ui_timing = clock_ui or (
+            starter_ui and not current_before_action.in_battle
+            and not (current_before_action.party_summary or []))
         h_state = build_heatz_state(
             runner.env, frame_idx=runner.frame_idx, story_bucket=event_id,
             facing=runner.facing, include_map=event_id in ce._EVENTS_REQUIRING_MAP_STATE)
@@ -131,8 +149,7 @@ def run_milestone(
                 and current_before_action.x == expected_state.x and current_before_action.y == expected_state.y)
             policy_idle = action == "WAIT"
             can_plan = ce._can_plan_from_state(current_before_action, visible_dialog=visible_dialog)
-            special_ui_active = ce._visual_clock_ui(runner.env) or (
-                event_id == "STARTER_CHOSEN" and _starter_ui_active(runner.env))
+            special_ui_active = clock_ui or starter_ui
             if not special_ui_active and policy_idle and at_physical_target and visible_dialog:
                 action = ce._target_tail_action(target_tail_actions); target_tail_actions += 1
                 policy_source = "heatz_script_tail_settle"; stuck_count = 0
@@ -147,7 +164,10 @@ def run_milestone(
 
 
         state_before_perform = current_before_action
-        current_state = runner.perform_action(action, metadata={"event_id": event_id, "policy_source": policy_source})
+        current_state = runner.perform_action(
+            action,
+            timing=_SPECIAL_UI_TIMING if special_ui_timing else None,
+            metadata={"event_id": event_id, "policy_source": policy_source})
         prev_action = action
         actions_taken += 1
         progress_key = ce._state_key(current_state)

@@ -65,15 +65,21 @@ def make_tic_fn(runner, rng: random.Random, rate: float):
     a short pause (8-20 idle frames) or a facing flick (4-frame tap-turn sideways and
     back, the idle block's proven turn-in-place cadence). Bounded: never during battle
     or dialog (nav control mode + the BG0 window-mask check; a false-positive dialog
-    read merely skips a tic). The tic runs through step_frame, so during a DRY attempt
-    it lands in the capture log and is replayed like everything else."""
+    read merely skips a tic), and never inside the Emerald clock-set screen (verified
+    blind spot, W33 clock fix: hand-set mode reads free_overworld with no BG0 window,
+    so only the visual clock predicate can veto there). The tic runs through
+    step_frame, so during a DRY attempt it lands in the capture log and is replayed
+    like everything else."""
     from collection import navigator as nav
+    from collection.heatz_adapter import _visual_clock_ui
 
     def tic() -> None:
         if rate <= 0 or rng.random() >= rate:
             return
         n = runner.nav_state()
         if n.in_battle or n.control_mode != "free_overworld" or nav._dialog_open(runner):
+            return
+        if _visual_clock_ui(getattr(runner, "env", None)):
             return
         if rng.random() < 0.5:
             for _ in range(rng.randint(8, 20)):
@@ -221,6 +227,35 @@ def solve_then_record_milestone(
     return result
 
 
+def _verify_scheduled_blocks(schedule, results, block_log, executed_nav_phases, phases_path):
+    """W33 blocks-dropped guard: every block scheduled after a COMPLETED milestone must
+    have executed, and every nav block that ran must have stamped its phase into
+    phases.jsonl (when recording). The W33 pilot bug — plan int milestone indices used
+    verbatim as schedule keys, never matching the director's event_id (string) lookup —
+    finished 51/51 green with all six expedition blocks silently dropped and an empty
+    phases.jsonl; this turns that failure class into a hard error at run end. Blocks
+    scheduled after milestones the run never completed (abort / stop_after) are excused."""
+    from collections import Counter
+
+    completed = {r["event_id"] for r in results if r["validation"] in ("passed", "skipped")}
+    ran_after = Counter(b.get("after") for b in block_log)
+    missing = [
+        f"{mid}: scheduled={len(blks)} executed={ran_after.get(mid, 0)}"
+        for mid, blks in schedule.items()
+        if mid in completed and ran_after.get(mid, 0) != len(blks)
+    ]
+    if missing:
+        raise RuntimeError("scheduled blocks did not execute: " + "; ".join(missing))
+    if phases_path is not None and executed_nav_phases:
+        rows = [json.loads(line) for line in Path(phases_path).read_text().splitlines() if line.strip()]
+        seen = Counter(row.get("phase") for row in rows)
+        for phase, want in Counter(executed_nav_phases).items():
+            if seen.get(phase, 0) < want:
+                raise RuntimeError(
+                    f"phases.jsonl is missing block phase entries for {phase!r}: "
+                    f"have {seen.get(phase, 0)}, executed {want}")
+
+
 def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-GBAdvance/rom.gba",
                     starter: str = "mudkip", seed: int = 0, record: bool = True,
                     stop_after: str | None = None, per_milestone_max: int = 18000,  # rescaled for condition-based pacing (W33 §3.5)
@@ -237,6 +272,7 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         schedule.setdefault(mid, []).extend(blks)
     nav_mk = None
     block_log = []
+    executed_nav_phases: list[str] = []
     ce.set_expected_starter(starter.capitalize())       # STARTER_CHOSEN gate holds THIS species
     events = discover_heatz_events(policy_dir)          # ordered, chained
     by_id = {e["event_id"]: e for e in events}
@@ -302,6 +338,8 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                                 rng=(random.Random(f"{persona_cfg['seed']}:nav")
                                      if persona_cfg.get("tie_break") else None))
                         outcome = run_nav_block(runner, blk, mk=nav_mk)
+                        if outcome.get("ran"):
+                            executed_nav_phases.append(blk.phase)
                     else:
                         outcome = run_block(runner, blk)
                     outcome["after"] = event_id
@@ -314,6 +352,10 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                 sink.close()
             total_frames = runner.frame_idx
             runner.close()
+    # W33 blocks-dropped guard: scheduled-but-unexecuted blocks (or missing phase
+    # stamps) RAISE here instead of letting the run finish green without its blocks.
+    _verify_scheduled_blocks(schedule, results, block_log, executed_nav_phases,
+                             (out / "phases.jsonl") if record else None)
     retry_rows = {r["event_id"]: r["retry"] for r in results if "retry" in r}
     summary = dict(starter=starter, seed=seed, persona=persona_cfg,
                    milestones_total=len(order),

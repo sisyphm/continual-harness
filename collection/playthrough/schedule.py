@@ -17,6 +17,7 @@ from collection.playthrough.blocks.item_use import ItemUse
 from collection.playthrough.blocks.mart import MartBuy
 from collection.playthrough.blocks.menus import Menus
 from collection.playthrough.blocks.pc_access import PcAccess
+from collection.playthrough.blocks.trainer_engagement import TrainerEngagement
 
 class _LegacyLifeBlock:
     """W33 §14.3 wander/browse restoration: adapt a v1 act-style life block (run via
@@ -66,6 +67,7 @@ EXPEDITION_BLOCKS: dict[str, type] = {
     "pc_access": PcAccess,
     "wander": WanderBlock,                       # W33 §14.3: v1 life blocks restored,
     "browse": BrowseBlock,                       # phase-tagged via _LegacyLifeBlock
+    "trainer_engagement": TrainerEngagement,     # task #46: scheduled trainer coverage
 }
 
 
@@ -73,11 +75,33 @@ def build_expedition_schedule(entries: list[dict]) -> dict[str, list]:
     """Explicit, deterministic expedition schedule: [{"after": milestone_id,
     "block": name, **kwargs}] -> {milestone_id: [block, ...]}. The seeded ROTATION
     scheduler (W33 §2/§9 change-matrix targeting) is a later item; this makes the
-    blocks carriable by a playthrough today, from config recorded in the manifest."""
+    blocks carriable by a playthrough today, from config recorded in the manifest.
+
+    The CANONICAL schedule key is the milestone NAME (event_id). "after" may be
+    given as the name or as its 0-based index into catalog.MILESTONE_ORDER (the
+    W33 expedition plan's format; GAME_RUNNING = 0) — converted and validated
+    HERE, at load. An unknown name or out-of-range index raises immediately: the
+    W33 pilot shipped int keys straight into the director's event_id (string)
+    lookup, so every block silently never matched and the runs finished green
+    with phases.jsonl empty."""
+    from collection.catalog import MILESTONE_ORDER
+
     sched: dict[str, list] = {}
     for e in entries:
+        after = e["after"]
+        if isinstance(after, bool) or not isinstance(after, (int, str)):
+            raise ValueError(f"invalid schedule key {after!r} (want milestone name or index)")
+        if isinstance(after, int):
+            if not 0 <= after < len(MILESTONE_ORDER):
+                raise ValueError(
+                    f"schedule index {after} out of range for MILESTONE_ORDER "
+                    f"(0..{len(MILESTONE_ORDER) - 1})")
+            after = MILESTONE_ORDER[after]
+        if after not in MILESTONE_ORDER:
+            raise ValueError(
+                f"scheduled block {e['block']!r} after unknown milestone {after!r}")
         kwargs = {k: v for k, v in e.items() if k not in ("after", "block")}
-        sched.setdefault(e["after"], []).append(EXPEDITION_BLOCKS[e["block"]](**kwargs))
+        sched.setdefault(after, []).append(EXPEDITION_BLOCKS[e["block"]](**kwargs))
     return sched
 
 # Overworld milestones where a WANDER block is safe to inject after completion.

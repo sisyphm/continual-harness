@@ -28,6 +28,13 @@ Union requirements closed by the plan (spec §2 rotation + item-4 acceptance):
   * grind_evolve on >= grind_runs_per_starter non-holdout runs per starter
     (3 starters x evolutions; aggregate >= 3 planned evolution cutscenes)
   * idle / menus sprinkled across runs
+  * task #46: every tracked OPTIONAL trainer assigned to >= trainer_runs_per_trainer
+    distinct non-holdout runs (trainer_engagement blocks at reachable, spine-safe
+    stages — see TRAINER_STAGE); grunt/Josh/Roxanne are spine milestones in every
+    run and never block-scheduled
+  * no block scheduled at an INELIGIBLE (scripted-tail) milestone boundary
+    (INELIGIBLE_BLOCK_BOUNDARIES; pilot evidence: ROUTE_101 == index 14 has no
+    free-overworld frame, so blocks placed there skip on precondition every run)
 
 Documented exclusions (surfaced in the plan's "excluded" section, never silent):
   * fish-table species (Old Rod slots): the fishing block is the reserved registry
@@ -73,6 +80,8 @@ from pathlib import Path
 from collection.audits.coverage import FLOOR
 from collection.catalog import MILESTONE_ORDER
 from collection.plan_change_matrix import map_windows, window_of
+from collection.playthrough.blocks.trainer_engagement import (
+    SPINE_TRAINER_FLAGS, TRACKED_TRAINER_FLAGS, TRAINER_FLAG_BASE)
 from collection.playthrough.schedule import _WANDER_OK
 
 STARTERS = ("mudkip", "torchic", "treecko")
@@ -105,7 +114,41 @@ PLAN_FLOORS = {
     "item_use_runs": 2,                            # overworld + battle legs
     "idle_run_share": 4,                           # >= N//4 runs carry an idle block
     "menus_run_share": 4,
+    # task #46: each tracked OPTIONAL trainer assigned to >= 2 distinct non-holdout
+    # runs (the audit floor is 2 runs with the flag set at run end); the three
+    # spine-guaranteed trainers are covered by every completing run's milestones
+    "trainer_runs_per_trainer": 2,
 }
+
+# task #46 trainer-engagement stages: the earliest SPINE-SAFE milestone at which each
+# tracked trainer's POSITION is reachable. Route 104 is ONE map key ("0,19") whose
+# south and north halves are only joined through Petalburg Woods, so south trainers
+# ride ROUTE_104_SOUTH and north trainers ROUTE_104_NORTH. Petalburg Woods trainers
+# wait for TEAM_AQUA_GRUNT_DEFEATED (a block must never pre-trigger the grunt
+# cutscene the spine owns), and the Rustboro Gym pair waits for TRAINER_JOSH_BATTLE
+# (fighting gym trainers before the Josh milestone would strand its policy against
+# an already-beaten trainer). Karen stands on Route 116 ("0,31"), one connection hop
+# east of Rustboro. All stages are SAFE_ANCHORS members (proven or pilot_verify).
+TRAINER_STAGE = {
+    TRAINER_FLAG_BASE + 318: "ROUTE_102",               # CALVIN   (0,17)
+    TRAINER_FLAG_BASE + 333: "ROUTE_102",               # ALLEN    (0,17)
+    TRAINER_FLAG_BASE + 603: "ROUTE_102",               # TIANA    (0,17)
+    TRAINER_FLAG_BASE + 615: "ROUTE_102",               # RICK     (0,17)
+    TRAINER_FLAG_BASE + 114: "ROUTE_104_SOUTH",         # CINDY    (0,19 south, y=44)
+    TRAINER_FLAG_BASE + 319: "ROUTE_104_SOUTH",         # BILLY    (0,19 south, y=67)
+    TRAINER_FLAG_BASE + 616: "TEAM_AQUA_GRUNT_DEFEATED",  # LYLE   (24,11)
+    TRAINER_FLAG_BASE + 621: "TEAM_AQUA_GRUNT_DEFEATED",  # JAMES  (24,11)
+    TRAINER_FLAG_BASE + 136: "ROUTE_104_NORTH",         # WINSTON  (0,19 north, y=25)
+    TRAINER_FLAG_BASE + 337: "ROUTE_104_NORTH",         # IVAN     (0,19 north, y=8)
+    TRAINER_FLAG_BASE + 483: "ROUTE_104_NORTH",         # GINA&MIA (0,19 north, y=15)
+    TRAINER_FLAG_BASE + 604: "ROUTE_104_NORTH",         # HALEY    (0,19 north, y=24)
+    TRAINER_FLAG_BASE + 280: "RUSTBORO_CITY",           # KAREN    (0,31 Route 116)
+    TRAINER_FLAG_BASE + 321: "TRAINER_JOSH_BATTLE",     # TOMMY    (11,3)
+    TRAINER_FLAG_BASE + 571: "TRAINER_JOSH_BATTLE",     # MARC     (11,3)
+}
+EST_TRAINER_BASE = 3000         # travel to the map + settle (planning estimate)
+EST_TRAINER_FRAMES = 9000       # approach + intro text + battle + outro per trainer
+TRAINER_BLOCK_FRAMES = 60_000   # generous block deadline (est governs the load)
 
 # Anchors beyond the S1-proven _WANDER_OK set, needed by change-matrix windows that
 # would otherwise be unplannable (gym mid-gauntlet cells; post-May Route 103/Oldale;
@@ -115,7 +158,21 @@ PLAN_FLOORS = {
 PILOT_VERIFY_ANCHORS = {"TRAINER_JOSH_BATTLE", "ROXANNE_BATTLE",
                         "MAY_ROUTE103_INTERACTION", "BACK_TO_OLDALE_FROM_ROUTE103",
                         "TEAM_AQUA_GRUNT_DEFEATED"}
-SAFE_ANCHORS = sorted(_WANDER_OK | PILOT_VERIFY_ANCHORS)
+
+# Milestone boundaries INELIGIBLE for block placement (live pilot evidence): these
+# milestones' completed checkpoints sit on a SCRIPTED TAIL with no free-overworld
+# frame (ROUTE_101 == plan index 14 is the measured case — the Birch-rescue trigger
+# fires the moment the player lands on the route), so any block scheduled there
+# skips on the precondition seam every single run. The authoritative signal is
+# collect_events._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET — the exact milestones whose
+# targets needed position-only acceptance BECAUSE memory reads free_overworld with a
+# script/dialog still live. Imported (not copied) so a policy-side addition follows
+# automatically. Block-side skip-with-reason stays as defense in depth; the planner
+# simply never schedules into a boundary that cannot host a block.
+import collection.collect_events as _ce
+INELIGIBLE_BLOCK_BOUNDARIES = frozenset(_ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET)
+
+SAFE_ANCHORS = sorted((_WANDER_OK | PILOT_VERIFY_ANCHORS) - INELIGIBLE_BLOCK_BOUNDARIES)
 EXCLUDED_MAPS = {"25,40"}       # intro truck interior (see module docstring)
 SURF_GATED_LAND = {"0,30"}      # audits/coverage.py access policy
 ENC_BLOCK_FRAMES = 35_000       # one encounter block ~= the per-run encounter budget
@@ -219,6 +276,33 @@ def build_requirements(manifest: dict, matrix: dict, floors: dict) -> dict:
         for w in manifest["maps"][t]["warps"]))
     centers = sorted(c for c in ("2,2", "8,4", "11,5") if c in scope)
 
+    # task #46: tracked-trainer targets. flag -> manifest map (the object whose
+    # parsed `trainerbattle` script id matches flag - 0x500 — the empirically
+    # verified mapping, see blocks/trainer_engagement.py), grouped per (stage, map)
+    # from TRAINER_STAGE. Spine-guaranteed flags are never block-scheduled; a flag
+    # whose stage/map fails validation lands in "unplannable", never silently out.
+    flag_map: dict[int, str] = {}
+    for k in scope:
+        if k not in manifest["maps"]:
+            continue
+        for o in manifest["maps"][k]["objects"]:
+            tid = o.get("trainer_id")
+            if tid and TRAINER_FLAG_BASE + tid in TRACKED_TRAINER_FLAGS:
+                flag_map.setdefault(TRAINER_FLAG_BASE + tid, k)
+    trainer_groups: dict[tuple[str, str], list[int]] = {}
+    for f in TRACKED_TRAINER_FLAGS:
+        if f in SPINE_TRAINER_FLAGS:
+            continue
+        k, stage = flag_map.get(f), TRAINER_STAGE.get(f)
+        if k is None or stage is None or stage not in matrix["stages"] \
+                or stage in INELIGIBLE_BLOCK_BOUNDARIES \
+                or k not in unlocked.get(stage, set()):
+            unplannable.append({"trainer_flag": f,
+                                "reason": "no manifest object / stage missing, "
+                                          "ineligible, or map locked at stage"})
+            continue
+        trainer_groups.setdefault((stage, k), []).append(f)
+
     fish_sp = sorted({int(sp) for k in scope
                       for sp, *_ in wild.get(k, {}).get("fish", {}).get("mons", [])[:2]})
     excluded = [
@@ -233,7 +317,8 @@ def build_requirements(manifest: dict, matrix: dict, floors: dict) -> dict:
             "usable_anchors": {k: usable_anchors(k) for k in scope},
             "cells": cells, "unplannable": unplannable, "pairs": pairs,
             "species_map": species_map, "land_maps": land_maps,
-            "towns": towns, "centers": centers, "excluded": excluded}
+            "towns": towns, "centers": centers, "excluded": excluded,
+            "trainer_groups": trainer_groups}
 
 
 def est_sweep_frames(manifest: dict, key: str) -> int:
@@ -392,6 +477,23 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
         add(r, "OLDALE_AFTER_POKEDEX", "item_use",
             {"grass_map": "0,16", "town": "0,10", "seed": rng.getrandbits(20)},
             "interaction_family", 30_000)
+
+    # -- trainer engagement (task #46): every tracked OPTIONAL trainer assigned to
+    #    >= trainer_runs_per_trainer distinct non-holdout runs, grouped per
+    #    (stage, map) so one block fights that map's whole tracked group; the
+    #    spine-guaranteed three (grunt/Josh/Roxanne) are milestones in every run
+    #    and never block-scheduled. Natural dodge-variance stays everywhere else —
+    #    no run is forced to fight all 18.
+    for (stage, key), t_flags in sorted(req["trainer_groups"].items()):
+        t_flags = sorted(t_flags)
+        used = set()
+        for _ in range(fl["trainer_runs_per_trainer"]):
+            r = pick("encounter", exclude=used)
+            used.add(r["run_id"])
+            add(r, stage, "trainer_engagement",
+                {"targets": [{"map": key, "trainer_flag": f} for f in t_flags],
+                 "frames": TRAINER_BLOCK_FRAMES, "seed": rng.getrandbits(20)},
+                "encounter", EST_TRAINER_BASE + len(t_flags) * EST_TRAINER_FRAMES)
 
     # -- grind_evolve: per starter, on that starter's own non-holdout runs
     grind_stage = "RUSTBORO_CITY"
@@ -568,6 +670,40 @@ def check_plan(plan: dict, *, manifest: dict, matrix: dict) -> dict:
     rows["interaction_maps"] = [
         {"key": k, "support": inter.get(k, 0), "ok": inter.get(k, 0) >= 1}
         for k in plannable]
+
+    # task #46: 18 per-trainer rows. Optional trainers count DISTINCT assigned
+    # non-holdout runs (floor trainer_runs_per_trainer); the three spine-guaranteed
+    # trainers (grunt/Josh/Roxanne — scripted/milestone battles, never
+    # block-schedulable) are fought by every completing run, so their support is the
+    # worker count, annotated with the owning milestone.
+    tr_floor = fl.get("trainer_runs_per_trainer", 2)
+    tr_runs: dict[int, set] = {f: set() for f in TRACKED_TRAINER_FLAGS}
+    for r, stage, args in blocks("trainer_engagement"):
+        for t in args.get("targets", []):
+            f = int(t.get("trainer_flag", -1))
+            if f in tr_runs:
+                tr_runs[f].add(r["run_id"])
+    trows = []
+    for f in TRACKED_TRAINER_FLAGS:
+        if f in SPINE_TRAINER_FLAGS:
+            trows.append({"key": f"tr_flag_{f:#06x}", "support": len(workers),
+                          "ok": len(workers) >= tr_floor,
+                          "spine": SPINE_TRAINER_FLAGS[f]})
+        else:
+            trows.append({"key": f"tr_flag_{f:#06x}", "support": len(tr_runs[f]),
+                          "ok": len(tr_runs[f]) >= tr_floor})
+    rows["trainers"] = trows
+
+    # block placement eligibility (pilot evidence): NO block may be scheduled at a
+    # scripted-tail milestone boundary — such a boundary has no free-overworld frame
+    # and every block there skips on precondition, every run
+    bad_bounds = sorted({
+        f"{r['run_id']}@{MILESTONE_ORDER[idx]}"
+        for r in plan["runs"] for idx, _bn, _args in r["block_schedule"]
+        if MILESTONE_ORDER[idx] in INELIGIBLE_BLOCK_BOUNDARIES})
+    rows["block_boundaries"] = [
+        {"key": "blocks_at_ineligible_boundaries", "support": len(bad_bounds),
+         "ok": not bad_bounds, "offenders": bad_bounds[:10]}]
 
     g_n = {st: 0 for st in STARTERS}
     for r, stage, args in blocks("grind_evolve"):
