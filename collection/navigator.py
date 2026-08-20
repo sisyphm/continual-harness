@@ -39,10 +39,17 @@ MANIFEST_JSON = "../pokemon-worldmodel/data/processed/coverage_manifest.json"
 
 
 class MapKnowledge:
-    """ROM-side per-map knowledge: metatile behaviors (via tileset attr tables) + warp events."""
+    """ROM-side per-map knowledge: metatile behaviors (via tileset attr tables) + warp events.
+
+    `rng` (W33 §14.1 persona layer): optional random.Random used by `goto`'s per-step BFS to
+    shuffle equal-cost neighbor expansion order. BFS stays level-order, so every returned step
+    still lies on A shortest path — the seed only picks WHICH of the equally-short paths a run
+    walks (same seed -> same route; different seeds -> measurably different routes; zero
+    correctness cost). None keeps the historical fixed expansion order."""
 
     def __init__(self, rom_path: str = ROM_PATH, tilesets_json: str = TILESETS_JSON,
-                 manifest_json: str = MANIFEST_JSON):
+                 manifest_json: str = MANIFEST_JSON, rng=None):
+        self.rng = rng
         self.rom = Path(rom_path).read_bytes()
         ts = json.loads(Path(tilesets_json).read_text())
         self.ptrs = ts["tileset_ptrs"]
@@ -119,9 +126,14 @@ _JUMP = {0x38: (1, 0), 0x39: (-1, 0), 0x3A: (0, -1), 0x3B: (0, 1)}
 
 def _bfs_step(walk: np.ndarray, start: tuple[int, int], goals: np.ndarray,
               elev: np.ndarray | None = None,
-              beh: np.ndarray | None = None) -> tuple[int, int] | None:
+              beh: np.ndarray | None = None,
+              rng=None) -> tuple[int, int] | None:
     """First step DIRECTION (dx, dy) of a shortest path from start to any True cell of `goals`
     over the walkable mask (buffer coords). None if unreachable.
+
+    `rng` (W33 §14.1): shuffles the per-node neighbor expansion order. The queue stays FIFO,
+    so expansion remains strictly level-order (BFS optimality untouched) — the shuffle only
+    tie-breaks which equal-cost parent claims a cell first, i.e. which shortest path wins.
 
     With `elev` (grid bits 12-15) the search is ELEVATION-AWARE: a cliff-top cell is collision-0
     yet unenterable from below (Route 115 burned 40k frames walking UP into one). pokeemerald's
@@ -138,12 +150,13 @@ def _bfs_step(walk: np.ndarray, start: tuple[int, int], goals: np.ndarray,
     prev: dict = {s3: None}
     q = deque([s3])
     hit = None
+    dirs = list(DIRS)
     while q:
         x, y, e = q.popleft()
         if goals[y, x] and (x, y) != start:
             hit = (x, y, e)
             break
-        for dx, dy in DIRS:
+        for dx, dy in (rng.sample(dirs, len(dirs)) if rng is not None else dirs):
             nx, ny = x + dx, y + dy
             if not (0 <= nx < w and 0 <= ny < h):
                 continue
@@ -204,7 +217,7 @@ def _unstick(runner, phase: str = "nav") -> None:
 
 
 def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = "nav",
-         stop_fn=None, visit_fn=None, avoid_fn=None, miss_fn=None) -> str:
+         stop_fn=None, visit_fn=None, avoid_fn=None, miss_fn=None, rng=None) -> str:
     """Walk toward the nearest goal cell; returns 'arrived' | 'battle' | 'stuck' | 'budget'.
     `goal_fn(t, beh) -> bool mask over buffer cells`. Replans every step; the first refused step
     triggers an unstick (script locks), repeated refusals transiently block the cell (NPCs,
@@ -225,7 +238,13 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
                                GOAL cells regardless of the walk mask, so a goal tile occupied
                                by a parked NPC (Brendan-house mom, measured 2026-08-20: 12
                                straight refusals, ~9.8k frames) can only be routed around by
-                               the CALLER dropping it from its goal mask."""
+                               the CALLER dropping it from its goal mask.
+      rng                    — (W33 §14.1) equal-cost tie-break rng for the per-step BFS;
+                               defaults to the MapKnowledge's persona rng (mk.rng) so every
+                               goto through a persona-seeded mk is route-diversified without
+                               each call site plumbing it."""
+    if rng is None:
+        rng = getattr(mk, "rng", None)
     blocked: dict[tuple[int, int], int] = {}                  # cell -> frame of the miss
     start_frame = runner.frame_idx
     misses = 0
@@ -259,7 +278,7 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
             if 0 <= cy < walk.shape[0] and 0 <= cx < walk.shape[1]:
                 walk[cy, cx] = False
         step = _bfs_step(walk, (bx, by), goals,
-                         elev=((t.grid >> 12) & 0xF).astype(np.uint8), beh=beh)
+                         elev=((t.grid >> 12) & 0xF).astype(np.uint8), beh=beh, rng=rng)
         if step is None:
             if blocked and resets < 4:                        # dead-ended by our own blocks
                 blocked.clear()

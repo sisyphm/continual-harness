@@ -31,10 +31,18 @@ def run_milestone(
     stall_actions: int = 1200,
     blocked_nav_actions: int = 120,
     starter: str = "mudkip",
+    tic_fn=None,
 ) -> dict:
     """Drive `runner` with policy `event_id` until its postcondition. Returns a dict
     {validation: passed|failed|skipped, failure_reason, actions_taken, start_frame,
-    end_frame}. Mirrors collect_one_event's loop 1:1 (same predicates/branches)."""
+    end_frame}. Mirrors collect_one_event's loop 1:1 (same predicates/branches).
+
+    `tic_fn` (W33 §14.3 micro-behavior noise): optional no-arg callable invoked once
+    per action-loop iteration, before the policy reads state. The director passes a
+    persona-seeded closure that occasionally emits a recorded human tic (short pause /
+    facing flick) through runner.step_frame — during a solve-then-record DRY attempt
+    those frames land in the capture log and are replayed like everything else, so
+    the tic is simply part of the button schedule."""
     policy = HeatzPolicy(event_id, Path(policy_dir) / event_id / f"{event_id}.py")
     start_frame = runner.frame_idx
     start_state = runner.state()
@@ -68,6 +76,8 @@ def run_milestone(
                     actions_taken=0, start_frame=start_frame, end_frame=runner.frame_idx)
 
     for _ in range(max_actions):
+        if tic_fn is not None:
+            tic_fn()
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(

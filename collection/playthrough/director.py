@@ -1,6 +1,27 @@
-"""Continuous playthrough director: one session, all milestones, no state loads."""
+"""Continuous playthrough director: one session, all milestones, no state loads.
+
+W33 §13 solve-then-record: every SPINE milestone is first solved UNRECORDED (recorder
++ sink detached, capture mode armed) with jittered savestate retries; the successful
+attempt's exact per-frame button schedule is then replayed UNDER recording from the
+same savestate and verified against the dry outcome (ledger-panel field vector +
+(map,x,y) — divergence raises DeterminismError). Recorder streams stay append-only
+and contain ONLY the successful trajectory; every recorded milestone doubles as a
+continuous determinism check.
+
+NOTE the block asymmetry: life/expedition BLOCKS still run RECORDED directly, as
+before (they are robust by contract — bounded, battle/dialog-safe, anchor-returning —
+and their summaries/phase savestates are expected downstream). Solve-then-record
+applies to spine milestones only.
+
+W33 §14 persona layer: per-run persona = {seed, tie_break, tic_rate, jitter}
+(manifest-recorded) drives (1) seeded BFS tie-breaking in the navigator (route
+diversity at zero correctness cost), (2) always-on milestone-start jitter (K0 idle
+frames, recorded — they ARE the recording's content), (3) seeded micro-behavior tics
+between spine actions (captured + replayed like everything else).
+"""
 from __future__ import annotations
 import json
+import random
 import time
 from pathlib import Path
 
@@ -12,14 +33,204 @@ import collection.collect_events as ce
 from collection.playthrough.spine import run_milestone
 
 
+class DeterminismError(RuntimeError):
+    """A recorded solve-then-record replay diverged from its dry solution (W33 §13)."""
+
+
+# W33 §14.4 persona defaults; every field is overridable via run_playthrough(persona=...).
+#   seed      — root of every persona-derived rng (tie-break, jitter, tics)
+#   tie_break — seeded BFS equal-cost tie-breaking in the navigator (bool)
+#   tic_rate  — per-action probability of a micro-behavior tic between spine actions
+#   jitter    — max K0 idle frames prepended at every milestone start (always-on jitter)
+DEFAULT_PERSONA = {"seed": 0, "tie_break": True, "tic_rate": 0.02, "jitter": 30}
+
+# Frame-alignment shift added per retry attempt on top of K0 (§13: "K varies per
+# attempt" — the fish-block decorrelation trick, promoted).
+JITTER_PER_ATTEMPT = 17
+
+_FACINGS = ("UP", "DOWN", "LEFT", "RIGHT")
+
+
+def build_persona(seed: int, persona: dict | None = None) -> dict:
+    """Materialize the run persona: defaults + overrides; seed falls back to the run seed."""
+    p = {**DEFAULT_PERSONA, **(persona or {})}
+    if persona is None or "seed" not in persona:
+        p["seed"] = seed
+    return p
+
+
+def make_tic_fn(runner, rng: random.Random, rate: float):
+    """W33 §14.3 micro-behavior noise: a persona-seeded closure for spine.run_milestone's
+    `tic_fn` hook. With probability `rate` per action it emits a recorded human tic —
+    a short pause (8-20 idle frames) or a facing flick (4-frame tap-turn sideways and
+    back, the idle block's proven turn-in-place cadence). Bounded: never during battle
+    or dialog (nav control mode + the BG0 window-mask check; a false-positive dialog
+    read merely skips a tic). The tic runs through step_frame, so during a DRY attempt
+    it lands in the capture log and is replayed like everything else."""
+    from collection import navigator as nav
+
+    def tic() -> None:
+        if rate <= 0 or rng.random() >= rate:
+            return
+        n = runner.nav_state()
+        if n.in_battle or n.control_mode != "free_overworld" or nav._dialog_open(runner):
+            return
+        if rng.random() < 0.5:
+            for _ in range(rng.randint(8, 20)):
+                runner.step_frame([], phase="tic", metadata={"src": "tic", "kind": "pause"})
+        else:
+            cur = runner.facing if runner.facing in _FACINGS else "DOWN"
+            side = rng.choice([d for d in _FACINGS if d != cur])
+            for d in (side, cur):
+                for _ in range(4):                 # < 8-frame turn window: turn, never step
+                    runner.step_frame([d], phase="tic", metadata={"src": "tic", "kind": "turn"})
+                for _ in range(8):
+                    runner.step_frame([], phase="tic", metadata={"src": "tic", "kind": "turn"})
+
+    return tic
+
+
+def _outcome_vector(runner) -> dict:
+    """The §13 verification vector: full ledger-panel field row + (map, x, y)."""
+    from collection.extractors.ledger_panel import read_ledger
+    from collection.extractors.ram import GBAState
+
+    n = runner.nav_state()
+    return {"pos": (n.map, n.x, n.y), "ledger": read_ledger(GBAState.snapshot(runner.env))}
+
+
+def _vector_mismatch(dry: dict, rec: dict) -> str | None:
+    """First mismatching component name between two outcome vectors, or None."""
+    import numpy as np
+
+    if dry["pos"] != rec["pos"]:
+        return f"pos dry={dry['pos']} recorded={rec['pos']}"
+    for name, va in dry["ledger"].items():
+        vb = rec["ledger"][name]
+        eq = np.array_equal(va, vb) if isinstance(va, np.ndarray) or isinstance(vb, np.ndarray) else va == vb
+        if not eq:
+            return f"ledger[{name}] dry={va!r} recorded={vb!r}"
+    return None
+
+
+def solve_then_record_milestone(
+    runner,
+    *,
+    event_id: str,
+    policy_dir: str,
+    expected_state,
+    postcondition: str,
+    start_money: int,
+    max_actions: int,
+    starter: str,
+    persona: dict,
+    max_attempts: int = 5,
+    fail_injector=None,
+    corrupt_replay=None,
+) -> dict:
+    """W33 §13 per-milestone loop on an already-initialized runner:
+
+    (a) snapshot state_bytes at milestone start;
+    (b) DRY attempt — recorder + frame_hook detached, capture mode armed — prepending
+        K = K0 + attempt * 17 persona-seeded idle jitter frames (K0 always-on, §14.2);
+    (c) dry failure: frame-neutral snapshot restore, retry with shifted jitter;
+    (d) dry success: restore, REPLAY the captured schedule frame-by-frame under
+        recording, verify the recorded outcome vector (ledger fields + (map,x,y))
+        against the dry one — mismatch raises DeterminismError naming the milestone;
+    (e) attempts exhausted: result flagged failed_persistent (policy defect — the
+        pilot gate's signal; the director aborts the run on it).
+
+    Returns run_milestone's result dict + {"retry": {attempts, jitters,
+    dry_frames_wasted, dry_frames_solve, replay_frames}}.
+
+    Test-only hooks (production None): `fail_injector(attempt)->kwargs-overrides` for
+    deterministic dry failures, `corrupt_replay(log)->log` for determinism-path tests.
+
+    With no recorder attached (record=False smoke runs) the retry/jitter machinery
+    still runs, but the successful dry attempt IS the run — no replay, no verify.
+    """
+    snap = runner.save_state_bytes()
+    assert snap is not None, "cannot snapshot for solve-then-record"
+    f0, facing0 = runner.frame_idx, runner.facing
+    jr = random.Random(f"{persona['seed']}:{event_id}:jitter")
+    k0 = jr.randint(0, int(persona.get("jitter", 0)))
+    tic_fn = make_tic_fn(runner, random.Random(f"{persona['seed']}:{event_id}:tic"),
+                         float(persona.get("tic_rate", 0.0)))
+    telemetry: dict = {"attempts": 0, "jitters": [], "dry_frames_wasted": 0,
+                       "dry_frames_solve": 0, "replay_frames": 0}
+    result: dict = {}
+    for attempt in range(max_attempts):
+        k = k0 + attempt * JITTER_PER_ATTEMPT
+        telemetry["attempts"] += 1
+        telemetry["jitters"].append(k)
+        overrides = fail_injector(attempt) if fail_injector is not None else {}
+        rec, hook = runner.recorder, runner.frame_hook
+        runner.recorder = None
+        runner.frame_hook = None
+        runner.capture_log = []
+        try:
+            for _ in range(k):
+                runner.step_frame([], phase="milestone_jitter",
+                                  metadata={"event_id": event_id, "attempt": attempt, "k": k})
+            result = run_milestone(
+                runner, event_id=event_id, policy_dir=policy_dir,
+                expected_state=expected_state, postcondition=postcondition,
+                start_money=start_money, starter=starter, tic_fn=tic_fn,
+                **{"max_actions": max_actions, **overrides})
+        finally:
+            log = runner.capture_log
+            runner.capture_log = None
+            runner.recorder = rec
+            runner.frame_hook = hook
+
+        if result["validation"] in ("passed", "skipped"):
+            dry_frames = runner.frame_idx - f0
+            telemetry["dry_frames_solve"] = dry_frames
+            if runner.recorder is None:
+                break                                   # unrecorded smoke: dry run IS the run
+            dry_vec = _outcome_vector(runner)
+            dry_facing = runner.facing
+            # frame-neutral rewind to the milestone-start snapshot, then the recorded replay
+            runner.frame_idx, runner.facing = f0, facing0
+            runner.load_state_bytes(snap, record=False)
+            runner.restore_log[-1]["solve"] = event_id
+            if corrupt_replay is not None:
+                log = corrupt_replay(list(log))
+            runner.replay_capture(log)
+            telemetry["replay_frames"] = runner.frame_idx - f0
+            rec_vec = _outcome_vector(runner)
+            mismatch = _vector_mismatch(dry_vec, rec_vec)
+            if mismatch is not None:
+                raise DeterminismError(
+                    f"milestone {event_id}: recorded replay diverged from dry solution "
+                    f"({mismatch})")
+            runner.facing = dry_facing                  # replay steps raw frames; resync tracker
+            result["start_frame"], result["end_frame"] = f0, runner.frame_idx
+            break
+
+        # dry attempt failed: frame-neutral restore, retry with shifted jitter
+        telemetry["dry_frames_wasted"] += runner.frame_idx - f0
+        runner.frame_idx = f0
+        runner.load_state_bytes(snap, record=False)
+        runner.restore_log[-1]["solve"] = event_id
+        runner.facing = facing0
+    else:
+        result["failed_persistent"] = True              # policy defect: never retried around
+
+    result["retry"] = telemetry
+    return result
+
+
 def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-GBAdvance/rom.gba",
                     starter: str = "mudkip", seed: int = 0, record: bool = True,
                     stop_after: str | None = None, per_milestone_max: int = 18000,  # rescaled for condition-based pacing (W33 §3.5)
-                    blocks: bool = False, expedition: list[dict] | None = None) -> dict:
+                    blocks: bool = False, expedition: list[dict] | None = None,
+                    persona: dict | None = None, max_attempts: int = 5) -> dict:
     from collection.playthrough.schedule import build_expedition_schedule, build_schedule
     from collection.playthrough.blocks.base import run_block, run_nav_block
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    persona_cfg = build_persona(seed, persona)
     schedule = build_schedule(seed) if blocks else {}
     # W33 §2: explicit expedition-block entries ([{after, block, **kwargs}]) merged in.
     for mid, blks in build_expedition_schedule(expedition or []).items():
@@ -33,17 +244,24 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
 
     recorder_cm = ChunkRecorder(str(out), run_id=f"playthrough_{starter}_s{seed}",
                                 visual_fps=1000 if record else 30, backend="npz",
-                                metadata={"kind": "playthrough", "starter": starter, "seed": seed})
+                                metadata={"kind": "playthrough", "starter": starter, "seed": seed,
+                                          "persona": persona_cfg})
     results = []
+    aborted_milestone = None
     t_run = time.time()
     with recorder_cm as recorder:
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=None,
                                       recorder=recorder if record else None)
         runner.initialize()
+        if record:
+            # W33 §14.4 persona plumbing: the persona is a first-class manifest field
+            recorder.manifest["persona"] = persona_cfg
+            recorder._write_manifest()
         sink = WorldModelSink(str(out)) if record else None
         if sink is not None:
             runner.frame_hook = sink.capture
         # Boot past the title screen: mash A/START until GAME_RUNNING (new game begins).
+        # Boot is recorded live (pre-spine); solve-then-record starts with the milestones.
         for _ in range(600):
             runner.step_frame(["a"], phase="boot")
             st = runner.state()
@@ -58,23 +276,31 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                 post = by_id[event_id].get("postcondition", event_id)
                 t0 = time.time()
                 f0 = runner.frame_idx
-                r = run_milestone(runner, event_id=event_id, policy_dir=policy_dir,
-                                  expected_state=exp, postcondition=post, start_money=start_money,
-                                  max_actions=per_milestone_max, starter=starter)
+                r = solve_then_record_milestone(
+                    runner, event_id=event_id, policy_dir=policy_dir,
+                    expected_state=exp, postcondition=post, start_money=start_money,
+                    max_actions=per_milestone_max, starter=starter,
+                    persona=persona_cfg, max_attempts=max_attempts)
                 r.update(event_id=event_id, wall_s=round(time.time() - t0, 1),
                          frames=runner.frame_idx - f0)
                 results.append(r)
                 st = runner.state()
                 print(json.dumps({**r, "map": st.map, "gs": st.game_state}), flush=True)
                 if r["validation"] not in ("passed", "skipped"):
+                    # §13(e): N attempts exhausted -> failed-persistent, abort the run
                     r["FAILED_RUN_HERE"] = True
+                    aborted_milestone = event_id
                     break
                 # Life blocks scheduled after this milestone (diversity injection).
+                # Blocks run RECORDED as today (robust by contract; summaries expected).
                 for blk in schedule.get(event_id, []):
                     if hasattr(blk, "run"):          # navigator-driven expedition block (W33)
                         if nav_mk is None:
                             from collection.navigator import MapKnowledge
-                            nav_mk = MapKnowledge(rom_path=rom_path)
+                            nav_mk = MapKnowledge(
+                                rom_path=rom_path,
+                                rng=(random.Random(f"{persona_cfg['seed']}:nav")
+                                     if persona_cfg.get("tie_break") else None))
                         outcome = run_nav_block(runner, blk, mk=nav_mk)
                     else:
                         outcome = run_block(runner, blk)
@@ -88,9 +314,18 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                 sink.close()
             total_frames = runner.frame_idx
             runner.close()
-    summary = dict(starter=starter, seed=seed, milestones_total=len(order),
+    retry_rows = {r["event_id"]: r["retry"] for r in results if "retry" in r}
+    summary = dict(starter=starter, seed=seed, persona=persona_cfg,
+                   milestones_total=len(order),
                    milestones_passed=sum(1 for r in results if r["validation"] in ("passed", "skipped")),
                    total_frames=total_frames, wall_s=round(time.time() - t_run, 1), results=results,
-                   blocks=block_log)
+                   blocks=block_log,
+                   # §13 retry telemetry: per-milestone rows + fleet-audit aggregates
+                   retry=retry_rows,
+                   retry_total=dict(
+                       attempts=sum(t["attempts"] for t in retry_rows.values()),
+                       dry_frames_wasted=sum(t["dry_frames_wasted"] for t in retry_rows.values()),
+                       dry_frames_solve=sum(t["dry_frames_solve"] for t in retry_rows.values())),
+                   aborted_milestone=aborted_milestone)
     (out / "playthrough_summary.json").write_text(json.dumps(summary, indent=2))
     return summary

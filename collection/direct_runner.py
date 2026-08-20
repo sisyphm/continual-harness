@@ -58,6 +58,13 @@ class DirectEmulatorRunner:
         # W33 §3.4: periodic savestates -> ANY future field derivable by load+short
         # replay, and runs resumable at block granularity. 0 disables (planning runners).
         self.savestate_every = savestate_every
+        # W33 §13 solve-then-record capture mode: when not None, every step_frame
+        # appends ("frame", buttons, phase, metadata) and every record_state_snapshot
+        # appends ("state", phase, metadata) — the DRY (recorder-detached) attempt's
+        # exact per-frame schedule plus its sparse state-row schedule, re-executable
+        # under recording by replay_capture(). The director arms/disarms this around
+        # each dry milestone attempt; nothing else touches it.
+        self.capture_log: list[tuple] | None = None
 
     def _save_periodic_state(self) -> None:
         import zlib
@@ -141,6 +148,8 @@ class DirectEmulatorRunner:
     def record_state_snapshot(self, *, phase: str, metadata: dict[str, Any] | None = None, state: AbstractState | None = None) -> AbstractState:
         state = state or self.state()
         self.last_recorded_state = state
+        if self.capture_log is not None:
+            self.capture_log.append(("state", phase, metadata))
         if self.recorder:
             row = state.to_dict()
             row["record_phase"] = phase
@@ -188,6 +197,8 @@ class DirectEmulatorRunner:
     ) -> None:
         assert self.env is not None
         source_frame = self.frame_idx
+        if self.capture_log is not None:
+            self.capture_log.append(("frame", list(buttons), phase, metadata))
         self.env.run_frame_with_buttons([button.lower() for button in buttons])
         self.frame_idx += 1
         if self.recorder:
@@ -279,6 +290,22 @@ class DirectEmulatorRunner:
             # frame). Restores are tallied for the manifest regardless.
             self.env.load_state(state_bytes=state_bytes, run_settle_frame=False)
         self.restore_log.append({"frame_idx": self.frame_idx, "recorded": bool(record)})
+
+    def replay_capture(self, log: list[tuple]) -> None:
+        """W33 §13 solve-then-record: re-execute a captured DRY schedule frame-by-frame
+        UNDER the attached recorder/sinks. `log` entries are ("frame", buttons, phase,
+        metadata) and ("state", phase, metadata) in execution order (see capture_log),
+        so the recording is row-for-row what a live recorded run of the same buttons
+        would have produced (action rows keep their semantic phase/metadata; the sparse
+        states.jsonl rows re-read the — deterministically identical — emulator state)."""
+        assert self.capture_log is None, "cannot replay while capture mode is armed"
+        for entry in log:
+            if entry[0] == "frame":
+                _, buttons, phase, metadata = entry
+                self.step_frame(list(buttons), phase=phase, metadata=metadata, record_state=False)
+            else:
+                _, phase, metadata = entry
+                self.record_state_snapshot(phase=phase, metadata=metadata)
 
     def wait_until_stable(
         self,

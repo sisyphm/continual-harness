@@ -18,6 +18,39 @@ from collection.playthrough.blocks.mart import MartBuy
 from collection.playthrough.blocks.menus import Menus
 from collection.playthrough.blocks.pc_access import PcAccess
 
+class _LegacyLifeBlock:
+    """W33 §14.3 wander/browse restoration: adapt a v1 act-style life block (run via
+    base.run_block) to the v2 nav-block contract (.name/.phase/.run) so it is
+    schedulable in expeditions AND its frames get a real phase tag — run_nav_block's
+    set_phase(block.phase) stamps every frame + drops the boundary savestate, exactly
+    like the native v2 blocks (v1 ran these untagged). run_block's own settle/anchor
+    machinery still does the work; run_nav_block's outer anchor-return is then a no-op.
+    Inner summary keys that collide with run_nav_block's outcome fields are prefixed
+    `legacy_` (run_nav_block merges the summary via **kwargs)."""
+
+    _inner_cls: type = None      # subclasses bind these
+    phase: str = ""
+
+    def __init__(self, max_actions: int = 900, **kwargs):
+        self.inner = self._inner_cls(**kwargs)
+        self.name = self.inner.name
+        self.max_actions = max_actions
+
+    def run(self, runner, mk, ctx) -> dict:
+        from collection.playthrough.blocks.base import run_block
+        out = run_block(runner, self.inner, max_actions=self.max_actions)
+        return {(f"legacy_{k}" if k in ("block", "ran", "anchor", "returned") else k): v
+                for k, v in out.items()}
+
+
+class WanderBlock(_LegacyLifeBlock):
+    _inner_cls, phase = Wander, "wander"
+
+
+class BrowseBlock(_LegacyLifeBlock):
+    _inner_cls, phase = Browse, "browse"
+
+
 # W33 corpus-v2 §2 expedition blocks (navigator-driven; run via base.run_nav_block).
 # The slot for the remaining library entry (fishing) stays reserved here — it lands
 # as one registry line.
@@ -31,6 +64,8 @@ EXPEDITION_BLOCKS: dict[str, type] = {
     "mart_buy": MartBuy,                         # W33 item 3c: the mart_pc_item family
     "item_use": ItemUse,
     "pc_access": PcAccess,
+    "wander": WanderBlock,                       # W33 §14.3: v1 life blocks restored,
+    "browse": BrowseBlock,                       # phase-tagged via _LegacyLifeBlock
 }
 
 
