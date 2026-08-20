@@ -30,7 +30,10 @@ import numpy as np
 
 # support floors (frames at 60 fps unless stated) — the definition of "covered"
 FLOOR = {"terrain": 100, "warp_traversals": 5, "entity_gfx": 2000, "entity_gfx_facing": 300,
-         "species_enemy": 3000, "species_player": 3000, "outcome_events": 10, "glyph": 2000}
+         "species_enemy": 3000, "species_player": 3000, "outcome_events": 10, "glyph": 2000,
+         # W33 item 4 direction balance: a PAIR is green only when BOTH directions
+         # clear the (already directional) warp floor — min(a->b, b->a) >= 5
+         "connection_pair": 5}
 SCREEN_MH, SCREEN_MW = 10, 15
 
 
@@ -65,11 +68,371 @@ def reachable_window_metatiles(grid: np.ndarray, beh: np.ndarray | None,
     return {int(v) for v in np.unique(grid[on_screen & interior] & 0x3FF)}
 
 
+# ======================================================================================
+# W33 corpus-v2 item 4: audit extension over RECORDED v2 RUN DIRECTORIES
+# (phases.jsonl + block summaries + per-tick ledger chunks) — the axes §5.1 adds on
+# top of the conditions-based v1 axes above. Extend, don't break: everything below is
+# additive; the conditions-based main() path is untouched unless --v2_runs is passed.
+# ======================================================================================
+
+# floors for the new axes (fleet-scale defaults; tests pass reduced floors)
+V2_FLOORS = {
+    "interaction_verb": 25,        # per verb, fleet-wide
+    "mart_event": 5, "pc_event": 5, "item_use_event": 5,
+    "mart_town": 1,                # each town's mart entered with >= 1 verified buy
+    "sweep_cell_tiles": 20,        # tiles visited inside a (map, stage-window) cell
+    "sweep_windows_per_map": 2,    # >= 2 anchor stages per map (capped by windows)
+    "connection_pair": FLOOR["connection_pair"],
+    "whiteout": FLOOR["outcome_events"],
+    "evolutions": 3,               # all three starter evolution cutscenes (§1)
+    "level_frames": 500,           # frames per observed lead level bucket
+    "level_spread": 6,             # distinct lead levels across the fleet
+    "low_hp_frames": 300,          # in-battle red-bar (<= 20%) frames
+    "battle_level_up": 3,          # in-battle level-up events
+}
+
+# DENSITY floors: events per 1,000 block frames per phase (§4/§5.2 — "a block that
+# regresses into padding is a red row"). Provenance: MEASURED on the 2026-08-21
+# item-4 acceptance recording (BACK_TO_ROUTE101_FROM_OLDALE state; legs + Route-101
+# sweep + menus + encounter_farm + idle, real emulator — tests/test_item4.py
+# re-records the same shape) plus the item-3 test pins; floors sit at ~30-50% of the
+# measured density so a healthy block clears with margin while a padding regression
+# (2x frames, same events) goes red:
+#   bfs_sweep    MEASURED 16.4 tiles/1k (67 tiles / 4.1k block frames) -> floor 5
+#                (the item-4 spec's suggested "sweep >= 5 tiles/1k")
+#   encounter    MEASURED 0.87 battles/1k (7 / 8.0k); consistent with the v2 pin
+#                "wild battle every ~0.5-1.5k paced frames"            -> 0.4
+#   menus        MEASURED 2.33 views/1k (3 / 1.3k)                     -> 1.0
+#   idle         MEASURED 823 dwell-frames/1k (1710 / 2.1k)            -> 500
+#   interaction  v2b pin: ~14 verbs, approach/talk ~1.2k f/verb => ~0.8/1k -> 0.4
+#   grind        battle-win cycle ~2x the flee cycle (v2b pin)         -> 0.2
+#   mart_pc_item v2c pins: a verified transaction lands in <= ~10k frames
+#                of block work (travel included)                       -> 0.1
+DENSITY_FLOORS = {"bfs_sweep": 5.0, "interaction": 0.4, "encounter": 0.4,
+                  "grind": 0.2, "mart_pc_item": 0.1, "menus": 1.0, "idle": 500.0}
+
+# density events per block: block name -> (phase, events-from-summary)
+_DENSITY_EVENTS = {
+    "bfs_sweep": ("bfs_sweep", lambda s: sum(s.get("tiles_visited_per_map", {}).values())),
+    "interaction": ("interaction", lambda s: sum(s.get("verbs", {}).values())),
+    "encounter_farm": ("encounter", lambda s: s.get("battles", 0)),
+    "grind_evolve": ("grind", lambda s: s.get("battles", 0)),
+    "menus": ("menus", lambda s: s.get("party_menu_views", 0) + s.get("summary_views", 0)
+              + s.get("bag_views", 0)),
+    "idle": ("idle", lambda s: s.get("dwell_frames", 0)),
+    "mart_buy": ("mart_pc_item", lambda s: sum(1 for p in s.get("purchases", []) if p.get("verified"))
+                 + sum(1 for p in s.get("sells", []) if p.get("verified"))),
+    "item_use": ("mart_pc_item", lambda s: s.get("overworld_uses", 0) + s.get("battle_uses", 0)),
+    "pc_access": ("mart_pc_item", lambda s: sum(1 for p in s.get("deposits", []) if p.get("verified"))
+                  + sum(1 for p in s.get("withdrawals", []) if p.get("verified"))),
+}
+
+INTERACTION_VERBS = ("npc_talk", "npc_retalk", "sign_read", "dialog_cancel",
+                     "object_interact", "ledge_hop", "door_bounce", "save_dialog")
+
+
+def _v2_stage_of(run_dir: Path) -> str | None:
+    """The story stage a standalone block run started from — parsed from the manifest
+    metadata's load_state path (…/storyline_wm/<STAGE>/attempt_*/final.state)."""
+    mp = run_dir / "manifest.json"
+    if not mp.exists():
+        return None
+    meta = (json.loads(mp.read_text()).get("metadata") or {})
+    parts = Path(str(meta.get("load_state", ""))).parts
+    if "storyline_wm" in parts:
+        return parts[parts.index("storyline_wm") + 1]
+    return None
+
+
+def v2_block_summaries(run_dir: str | Path) -> list[tuple[dict, str | None]]:
+    """(summary, stage) for every block outcome a run dir carries — single-block jobs
+    (block_summary.json), multi-block jobs (block_summaries.json) and full director
+    runs (playthrough_summary.json blocks[], whose entries carry 'after')."""
+    run = Path(run_dir)
+    out: list[tuple[dict, str | None]] = []
+    stage = _v2_stage_of(run)
+    p = run / "block_summary.json"
+    if p.exists():
+        out.append((json.loads(p.read_text()), stage))
+    p = run / "block_summaries.json"
+    if p.exists():
+        out += [(s, stage) for s in json.loads(p.read_text())]
+    p = run / "playthrough_summary.json"
+    if p.exists():
+        out += [(s, s.get("after")) for s in json.loads(p.read_text()).get("blocks", [])]
+    return out
+
+
+def v2_run_ledger(run_dir: str | Path):
+    from collection.derive import load_run_ledger
+    return load_run_ledger(run_dir)
+
+
+def v2_phase_frames(run_dir: str | Path) -> dict[str, int]:
+    """Recorded frames per phase from phases.jsonl spans (span end = next transition
+    or the action-row count). Informational alongside the block-summary frames."""
+    run = Path(run_dir)
+    pp = run / "phases.jsonl"
+    if not pp.exists():
+        return {}
+    trans = [json.loads(l) for l in pp.open()]
+    total = sum(1 for _ in (run / "actions.jsonl").open()) if (run / "actions.jsonl").exists() else 0
+    out: dict[str, int] = {}
+    for i, t in enumerate(trans):
+        end = trans[i + 1]["frame_idx"] if i + 1 < len(trans) else total
+        if t["phase"] is not None:
+            out[t["phase"]] = out.get(t["phase"], 0) + max(0, end - t["frame_idx"])
+    return out
+
+
+def _party_down_events(led) -> int:
+    """Whiteout proxy from the per-tick ledger: the whole party's hp hits 0."""
+    valid = (led["valid"] > 0) & (led["party_count"] > 0)
+    have = led["species"] > 0
+    hp_total = (led["hp"] * have).sum(axis=1)
+    any_mon = have.any(axis=1)
+    down = valid & any_mon & (hp_total == 0)
+    up = valid & any_mon & (hp_total > 0)
+    events = 0
+    state_up = False
+    for i in range(len(down)):
+        if up[i]:
+            state_up = True
+        elif down[i] and state_up:
+            events += 1
+            state_up = False
+    return events
+
+
+def _evolution_events(led) -> Counter:
+    """(from_species -> to_species) events: a party slot's species changes while its
+    personality stays — the ledger-native evolution signal."""
+    ev = Counter()
+    sp, pid, valid = led["species"], led["personality"], led["valid"] > 0
+    for slot in range(sp.shape[1]):
+        s, p = sp[:, slot].astype(np.int64), pid[:, slot]
+        m = valid[1:] & valid[:-1] & (s[1:] > 0) & (s[:-1] > 0) \
+            & (s[1:] != s[:-1]) & (p[1:] == p[:-1]) & (p[1:] != 0)
+        for i in np.flatnonzero(m):
+            ev[(int(s[i]), int(s[i + 1]))] += 1
+    return ev
+
+
+def v2_axes(run_dirs, *, change_matrix: dict | None = None,
+            floors: dict | None = None) -> dict[str, list]:
+    """The new §5.1 axes over v2 run dirs. Every axis emits rows even at zero support
+    (absence must be visible); 'deferred' rows document §11-derivable-later fields."""
+    fl = dict(V2_FLOORS)
+    fl.update(floors or {})
+    runs = [Path(r) for r in run_dirs]
+    rows: dict[str, list] = {}
+
+    verbs, mart, pair_dir = Counter(), Counter(), Counter()
+    towns_bought = Counter()
+    sweep_cells = Counter()                       # (map, window) -> tiles
+    sweep_windows: dict[str, set] = {}
+    for run in runs:
+        for s, stage in v2_block_summaries(run):
+            for v, n in s.get("verbs", {}).items():
+                verbs[v] += n
+            for pu in s.get("purchases", []):
+                if pu.get("verified"):
+                    mart["mart_purchase"] += 1
+            for se in s.get("sells", []):
+                if se.get("verified"):
+                    mart["mart_sell"] += 1
+            for town, stock in s.get("stock", {}).items():
+                if stock and any(p.get("verified") for p in s.get("purchases", [])):
+                    towns_bought[town] += 1
+            for d in s.get("deposits", []):
+                if d.get("verified"):
+                    mart["pc_deposit"] += 1
+            for w in s.get("withdrawals", []):
+                if w.get("verified"):
+                    mart["pc_withdraw"] += 1
+            mart["item_use_overworld"] += s.get("overworld_uses", 0)
+            mart["item_use_battle"] += s.get("battle_uses", 0)
+            for a, b in s.get("connections_crossed", []):
+                pair_dir[(a, b)] += 1
+            for pr in s.get("door_pairs", []):
+                if isinstance(pr, (list, tuple)) and len(pr) == 2:
+                    pair_dir[(pr[0], pr[1])] += 1
+                    pair_dir[(pr[1], pr[0])] += 1
+            if stage is not None and s.get("tiles_visited_per_map"):
+                from collection.plan_change_matrix import window_of
+                for k, tiles in s["tiles_visited_per_map"].items():
+                    w = window_of(change_matrix, k, stage) if change_matrix else "*"
+                    sweep_cells[(k, w)] += tiles
+                    sweep_windows.setdefault(k, set()).add(w)
+
+    rows["interaction_verbs"] = [
+        {"key": v, "support": verbs.get(v, 0), "ok": verbs.get(v, 0) >= fl["interaction_verb"]}
+        for v in INTERACTION_VERBS]
+    rows["mart_pc_item"] = (
+        [{"key": k, "support": mart.get(k, 0),
+          "ok": mart.get(k, 0) >= fl["mart_event" if k.startswith("mart") else
+                                     "pc_event" if k.startswith("pc") else
+                                     "item_use_event"]}
+         for k in ("mart_purchase", "mart_sell", "pc_deposit", "pc_withdraw",
+                   "item_use_overworld", "item_use_battle")]
+        + [{"key": f"mart@{t}", "support": n, "ok": n >= fl["mart_town"]}
+           for t, n in sorted(towns_bought.items())])
+
+    # per-(map, stage-window) sweep coverage — rows enumerate the CHANGE MATRIX's
+    # cells (required universe) plus anything actually swept; per-map window counts
+    # audit the ">= 2 anchor stages" rule
+    cell_rows, win_rows = [], []
+    if change_matrix is not None:
+        from collection.plan_change_matrix import map_windows
+        for k in sorted(change_matrix["matrix"]):
+            wins = map_windows(change_matrix, k)
+            for w in wins:
+                sup = sweep_cells.get((k, w), 0)
+                cell_rows.append({"key": f"{k}@{w}", "support": sup,
+                                  "ok": sup >= fl["sweep_cell_tiles"]})
+            n = len(sweep_windows.get(k, set()))
+            want = min(fl["sweep_windows_per_map"], len(wins))
+            win_rows.append({"key": k, "support": n, "ok": n >= want})
+    else:
+        for (k, w), sup in sorted(sweep_cells.items()):
+            cell_rows.append({"key": f"{k}@{w}", "support": sup,
+                              "ok": sup >= fl["sweep_cell_tiles"]})
+    rows["sweep_cells"] = cell_rows
+    rows["sweep_windows_per_map"] = win_rows
+
+    pair_min: dict[tuple[str, str], int] = {}
+    for (a, b), n in pair_dir.items():
+        key = tuple(sorted((a, b)))
+        rev = pair_dir.get((b, a), 0)
+        pair_min[key] = min(n, rev) if key not in pair_min else pair_min[key]
+    rows["connection_pairs"] = [
+        {"key": f"{a}<->{b}", "support": n, "ok": n >= fl["connection_pair"]}
+        for (a, b), n in sorted(pair_min.items())]
+
+    # ---- ledger-derived axes (whiteouts / evolutions / levels / battle situations)
+    whiteouts = 0
+    evo = Counter()
+    level_frames = Counter()
+    low_hp = 0
+    lvl_ups = 0
+    for run in runs:
+        led = v2_run_ledger(run)
+        if led is None:
+            continue
+        whiteouts += _party_down_events(led)
+        evo += _evolution_events(led)
+        lead_ok = (led["valid"] > 0) & (led["species"][:, 0] > 0)
+        for lv, n in zip(*np.unique(led["level"][:, 0][lead_ok], return_counts=True)):
+            level_frames[int(lv)] += int(n)
+        ib = (led["in_battle"] > 0) & (led["valid"] > 0)
+        low_hp += int((ib & (led["active_max_hp"] > 0) & (led["active_hp"] > 0)
+                       & (led["active_hp"] * 5 <= led["active_max_hp"])).sum())
+        al, ap_ = led["active_level"].astype(np.int64), led["active_personality"]
+        m = ib[1:] & ib[:-1] & (ap_[1:] == ap_[:-1]) & (ap_[1:] != 0) \
+            & (al[1:] == al[:-1] + 1)
+        lvl_ups += int(m.sum())
+
+    rows["outcomes_v2"] = (
+        [{"key": "whiteout", "support": whiteouts, "ok": whiteouts >= fl["whiteout"]},
+         {"key": "evolution", "support": int(sum(evo.values())),
+          "ok": sum(evo.values()) >= fl["evolutions"]}]
+        + [{"key": f"evolution:{a}->{b}", "support": n, "ok": n >= 1}
+           for (a, b), n in sorted(evo.items())])
+    rows["level_hist"] = (
+        [{"key": f"lv{lv}", "support": n, "ok": n >= fl["level_frames"]}
+         for lv, n in sorted(level_frames.items())]
+        + [{"key": "level_spread", "support": len(level_frames),
+            "ok": len(level_frames) >= fl["level_spread"]}])
+    rows["battle_situation"] = [
+        {"key": "low_hp_bar", "support": low_hp, "ok": low_hp >= fl["low_hp_frames"]},
+        {"key": "battle_level_up", "support": lvl_ups,
+         "ok": lvl_ups >= fl["battle_level_up"]},
+        # no status/crit field in the v2 ledger schema (ledger_panel.FIELDS) —
+        # documented DERIVABLE-LATER via §11: one derive.py reader over
+        # gBattleMons.status1 (+0x4C) / battle result flags, scheduled pilot backfill
+        *[{"key": k, "support": 0, "ok": False,
+           "deferred": "derivable via §11 derive.py reader (gBattleMons.status1 "
+                       "@ +0x4C / battle outcome flags) — pilot backfill"}
+          for k in ("status_psn", "status_slp", "status_par", "crit")],
+    ]
+    return rows
+
+
+def v2_density(run_dirs, *, floors: dict | None = None) -> list[dict]:
+    """§5.2 density audit: events per 1k BLOCK frames per phase, from the block
+    summaries (events and frames from the same source); phases.jsonl frame spans are
+    reported alongside as `recorded_frames` (includes settle/return overhead)."""
+    fl = dict(DENSITY_FLOORS)
+    fl.update(floors or {})
+    ev, fr = Counter(), Counter()
+    rec = Counter()
+    for run in run_dirs:
+        for ph, n in v2_phase_frames(run).items():
+            rec[ph] += n
+        for s, _ in v2_block_summaries(Path(run)):
+            name = s.get("block")
+            if name not in _DENSITY_EVENTS or not s.get("ran"):
+                continue
+            phase, fn = _DENSITY_EVENTS[name]
+            ev[phase] += fn(s)
+            fr[phase] += s.get("frames", 0)
+    rows = []
+    for phase in sorted(set(ev) | set(fr)):
+        frames = fr[phase]
+        per_1k = round(ev[phase] * 1000.0 / frames, 2) if frames else 0.0
+        rows.append({"phase": phase, "events": int(ev[phase]), "block_frames": int(frames),
+                     "recorded_frames": int(rec.get(phase, 0)), "per_1k": per_1k,
+                     "floor": fl.get(phase), "ok": (fl.get(phase) is None
+                                                   or per_1k >= fl[phase])})
+    return rows
+
+
+def audit_v2(run_dirs, *, change_matrix: dict | None = None,
+             floors: dict | None = None, density_floors: dict | None = None) -> dict:
+    axes = v2_axes(run_dirs, change_matrix=change_matrix, floors=floors)
+    density = v2_density(run_dirs, floors=density_floors)
+    return {
+        "runs": [str(r) for r in run_dirs],
+        "summary": {ax: {"rows": len(rs), "red": sum(not r["ok"] for r in rs)}
+                    for ax, rs in axes.items()},
+        "density_red": sum(not r["ok"] for r in density),
+        "rows": axes,
+        "density": density,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data_root", default="../pokemon-worldmodel/data")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--v2_runs", nargs="*", default=None,
+                    help="v2 run dirs (or globs) — adds the item-4 axes/density audit")
+    ap.add_argument("--v2_only", action="store_true",
+                    help="skip the conditions pass; audit only the v2 run dirs")
+    ap.add_argument("--change_matrix", default=None,
+                    help="default: <data_root>/processed/w33_change_matrix.json")
     args = ap.parse_args()
+
+    v2_report = None
+    if args.v2_runs is not None:
+        import glob as _glob
+        dirs = sorted(d for pat in args.v2_runs for d in _glob.glob(pat))
+        cm_path = Path(args.change_matrix) if args.change_matrix else \
+            Path(args.data_root) / "processed/w33_change_matrix.json"
+        cm = json.loads(cm_path.read_text()) if cm_path.exists() else None
+        v2_report = audit_v2(dirs, change_matrix=cm)
+        print("=== V2 RUN AUDIT (item-4 axes; red = below floor) ===")
+        for ax, s in v2_report["summary"].items():
+            print(f"  {ax:22s}: {s['rows']:>4} rows, {s['red']:>4} RED")
+        print(f"  density: {len(v2_report['density'])} phases, "
+              f"{v2_report['density_red']} RED")
+        if args.v2_only:
+            out = Path(args.out) if args.out else \
+                Path(args.data_root) / "processed/audit/v2_coverage_report.json"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(v2_report, indent=1))
+            print(f"wrote {out}")
+            return
     root = Path(args.data_root)
     M = json.loads((root / "processed/coverage_manifest.json").read_text())
     tilesets = json.loads((root / "processed/conditions/tilesets.json").read_text())["maps"]
@@ -214,7 +577,10 @@ def main():
     rows["terrain"] = [{"key": f"ts{t}/mt{m_}", "support": terrain.get((t, m_), 0),
                         "ok": terrain.get((t, m_), 0) >= FLOOR["terrain"]}
                        for (t, m_) in sorted(universe)]
-    # warps: manifest pairs in scope, per direction
+    # warps: manifest pairs in scope, per direction. VERIFIED directional (W33 item 4
+    # review): warp_n keys on ordered (prev_map, cur_map) transitions, and the row set
+    # enumerates a->b AND b->a separately (manifest warps/connections are symmetric in
+    # scope — probe 2026-08-20: all 45 unordered pairs have both directed rows).
     wrows = []
     for a in scope:
         if a not in maps:
@@ -224,6 +590,15 @@ def main():
             c = warp_n.get((a, b), 0)
             wrows.append({"key": f"{a}->{b}", "support": c, "ok": c >= FLOOR["warp_traversals"]})
     rows["warps"] = wrows
+    # direction BALANCE (W33 item 4): pair rows — support = the weaker direction, so
+    # a corpus that only ever crosses A->B stays red until the reverse leg exists too
+    pair_dirs: dict[tuple[str, str], list[int]] = {}
+    for r_ in wrows:
+        a, b = r_["key"].split("->")
+        pair_dirs.setdefault(tuple(sorted((a, b))), []).append(r_["support"])
+    rows["connection_pairs"] = [
+        {"key": f"{a}<->{b}", "support": min(v), "ok": min(v) >= FLOOR["connection_pair"]}
+        for (a, b), v in sorted(pair_dirs.items())]
     # entity-gfx universe, ACCESS-AWARE: ids 240-255 are OBJ_EVENT_GFX_VAR_* slots (resolved at
     # runtime from VARs — the live sprite is counted under its REAL id, so the placeholder rows
     # can never match). gfx whose only in-scope placements sit in Surf-gated areas (Route 103's
@@ -311,6 +686,8 @@ def main():
                           for ax, rs in rows.items()},
               "menus_proxy_distinct_window_patterns": len(win_patterns),
               "rows": rows}
+    if v2_report is not None:
+        report["v2"] = v2_report
     out = Path(args.out) if args.out else root / "processed/audit/coverage_report.json"
     out.write_text(json.dumps(report, indent=1))
     print("=== COVERAGE vs MANIFEST (red = below floor) ===")
