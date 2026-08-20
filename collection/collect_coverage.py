@@ -123,7 +123,7 @@ def collect_coverage(*, load_state, output_dir, rom_path, backend, max_step_fram
 
     # ---------- Phase 2: TOUR (continuous, recording) ----------
     with ChunkRecorder(out, run_id=f"coverage_{story_bucket}", emulator_fps=60, visual_fps=60,
-                       backend=backend, lean=True, metadata={"story_bucket": story_bucket}) as rec:
+                       backend=backend, metadata={"story_bucket": story_bucket}) as rec:
         sink = WorldModelSink(out)
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=load_state, story_bucket=story_bucket,
                                       recorder=rec, emulator_fps=60, frame_hook=sink.capture)

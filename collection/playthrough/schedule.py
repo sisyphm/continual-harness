@@ -8,6 +8,42 @@ import random
 from collection.playthrough.blocks.wander import Wander
 from collection.playthrough.blocks.grass import Grass
 from collection.playthrough.blocks.browse import Browse
+from collection.playthrough.blocks.bfs_sweep import BfsSweep
+from collection.playthrough.blocks.encounter_farm import EncounterFarm
+from collection.playthrough.blocks.grind_evolve import GrindEvolve
+from collection.playthrough.blocks.idle import Idle
+from collection.playthrough.blocks.interaction import Interaction
+from collection.playthrough.blocks.item_use import ItemUse
+from collection.playthrough.blocks.mart import MartBuy
+from collection.playthrough.blocks.menus import Menus
+from collection.playthrough.blocks.pc_access import PcAccess
+
+# W33 corpus-v2 §2 expedition blocks (navigator-driven; run via base.run_nav_block).
+# The slot for the remaining library entry (fishing) stays reserved here — it lands
+# as one registry line.
+EXPEDITION_BLOCKS: dict[str, type] = {
+    "bfs_sweep": BfsSweep,
+    "encounter_farm": EncounterFarm,
+    "interaction": Interaction,
+    "grind_evolve": GrindEvolve,
+    "idle": Idle,
+    "menus": Menus,
+    "mart_buy": MartBuy,                         # W33 item 3c: the mart_pc_item family
+    "item_use": ItemUse,
+    "pc_access": PcAccess,
+}
+
+
+def build_expedition_schedule(entries: list[dict]) -> dict[str, list]:
+    """Explicit, deterministic expedition schedule: [{"after": milestone_id,
+    "block": name, **kwargs}] -> {milestone_id: [block, ...]}. The seeded ROTATION
+    scheduler (W33 §2/§9 change-matrix targeting) is a later item; this makes the
+    blocks carriable by a playthrough today, from config recorded in the manifest."""
+    sched: dict[str, list] = {}
+    for e in entries:
+        kwargs = {k: v for k, v in e.items() if k not in ("after", "block")}
+        sched.setdefault(e["after"], []).append(EXPEDITION_BLOCKS[e["block"]](**kwargs))
+    return sched
 
 # Overworld milestones where a WANDER block is safe to inject after completion.
 _WANDER_OK = {

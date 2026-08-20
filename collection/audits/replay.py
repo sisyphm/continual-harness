@@ -25,6 +25,14 @@ from collection.render_state import BLOCK_SIZES, extract_full_ppu_state
 from collection.world_model_sink import serialize_ppu
 
 
+def load_actions(run_dir: Path) -> dict:
+    """frame_idx -> buttons_held over ALL rows of actions.jsonl. The stream is
+    homogeneous by contract (phase transitions live in phases.jsonl, never here),
+    so every row must carry the action keys."""
+    return {r["frame_idx"]: r["buttons_held"]
+            for r in (json.loads(l) for l in (run_dir / "actions.jsonl").open())}
+
+
 def recorded_blobs(run_dir: Path):
     """Yield (frame_idx, blob bytes) by streaming the recorded delta chain."""
     idx = json.loads((run_dir / "ppu_state.bin.idx.json").read_text())
@@ -55,8 +63,7 @@ def main():
     args = ap.parse_args()
     run = Path(args.run)
 
-    actions = {r["frame_idx"]: r["buttons_held"]
-               for r in (json.loads(l) for l in (run / "actions.jsonl").open())}
+    actions = load_actions(run)
 
     from pokemon_env.emulator import EmeraldEmulator
     env = EmeraldEmulator(rom_path=args.rom)

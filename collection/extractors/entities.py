@@ -140,6 +140,24 @@ def npcs(st: GBAState) -> list[Entity]:
     return [e for e in entities(st) if not e.is_player]
 
 
+def player_pace_read(env) -> tuple[bool, str | None] | None:
+    """Per-frame poll for condition-based pacing (W33 §3.5): the player record's
+    (mid_step, facing) in ONE bus read of the whole gObjectEvents block — no Entity
+    construction, no gSprites/camera reads (the pacing loop runs this every frame).
+    mid_step is Entity.mid_step verbatim: current != previous tile coords while the
+    sub-tile walk animation runs. Returns None when no valid player record exists
+    (map-load blackout / intro frames) — callers treat that as `not mid-step`."""
+    raw = GBAState.from_env(env).bytes(OBJ_BASE, OBJ_SIZE * OBJ_N)
+    for slot in range(OBJ_N):
+        o = slot * OBJ_SIZE
+        if not (raw[o] & 1) or raw[o + 0x08] != PLAYER_LOCALID:   # active + player localId
+            continue
+        cur = raw[o + 0x10:o + 0x14]                              # Coords16 current (x, y)
+        prev = raw[o + 0x14:o + 0x18]                             # Coords16 previous (x, y)
+        return cur != prev, DIRECTIONS.get(raw[o + 0x18] & 0xF)
+    return None
+
+
 def player_state(st: GBAState) -> dict:
     """Player position from the saveblock (bit-exact vs recorded semantics); facing + movement from
     the player's object record (the rendered truth — see module docstring). Saveblock facing is the

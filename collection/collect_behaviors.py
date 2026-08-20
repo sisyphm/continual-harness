@@ -875,7 +875,7 @@ def collect_behavior(*, job: str, load_state: str, output_dir: str, rom_path: st
     out = Path(output_dir); out.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
     with ChunkRecorder(out, run_id=f"behavior_{job}", emulator_fps=60, visual_fps=60,
-                       backend=backend, lean=True, metadata={"story_bucket": f"behavior_{job}"}) as rec:
+                       backend=backend, metadata={"story_bucket": f"behavior_{job}"}) as rec:
         sink = WorldModelSink(out)
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=load_state,
                                       story_bucket=f"behavior_{job}", recorder=rec,

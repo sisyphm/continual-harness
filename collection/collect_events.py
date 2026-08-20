@@ -8,7 +8,7 @@ from collections import deque
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from collection.actions import normalize_action, run_action_frames, timing_for, update_facing
+from collection.actions import normalize_action, paced_action_frames, update_facing
 from collection.catalog import EVENT_POSTCONDITION_ALIAS, discover_heatz_events
 from collection.direct_runner import DirectEmulatorRunner
 from collection.heatz_adapter import HeatzPolicy, _starter_ui_active, _visual_clock_ui, _visual_dialog_open, build_heatz_state, grind_action, heal_action, may_heal_action
@@ -471,7 +471,7 @@ def _visible_dialog_open(runner: DirectEmulatorRunner) -> bool:
 
 
 _TARGET_TAIL_ACTIONS = ("A", "A", "WAIT", "A", "B", "WAIT")
-_TARGET_TAIL_STALL_LIMIT = 96
+_TARGET_TAIL_STALL_LIMIT = 288  # rescaled for condition-based pacing (W33 §3.5): ~3x more actions per frame
 
 
 def _target_tail_action(index: int) -> str:
@@ -532,12 +532,18 @@ def _simulate_action(runner: DirectEmulatorRunner, state_bytes: bytes, facing: s
         runner.recorder = None
         runner.frame_idx = saved_frame_idx
         runner.facing = facing
-        runner.env.load_state(state_bytes=state_bytes)
+        runner.env.load_state(state_bytes=state_bytes, run_settle_frame=False)
+        # tally EVERY restore (W33: the manifest must prove "no hidden frames") — the
+        # planner's frame-neutral sims included; sim=True marks them as non-recorded
+        # planning restores.
+        runner.restore_log.append({"frame_idx": saved_frame_idx, "recorded": False, "sim": True})
         runner.facing = update_facing(facing, action)
-        for buttons in run_action_frames(action, timing_for("normal")):
+        # W33 §3.5: the planner runs EXACTLY the frames perform_action would run — the
+        # same paced_action_frames generator over the same probe (the shared schedule
+        # replaces the old fixed normal schedule + 24 settle frames), so every BFS plan
+        # is executed verbatim by the real pacing path.
+        for buttons in paced_action_frames(action, runner.pace_probe):
             runner.env.run_frame_with_buttons([button.lower() for button in buttons])
-        for _ in range(24):
-            runner.env.run_frame_with_buttons([])
         post = _read_nav_snapshot(runner)
         post_bytes = runner.save_state_bytes()
         if post_bytes is None:
@@ -545,7 +551,10 @@ def _simulate_action(runner: DirectEmulatorRunner, state_bytes: bytes, facing: s
         return post, post_bytes, runner.facing
     finally:
         runner.recorder = None
-        runner.env.load_state(state_bytes=current_bytes)
+        # frame-neutral: the live emulator returns to EXACTLY the pre-simulation state;
+        # the recorder's world and reality stay in lockstep (v1 leaked +1 frame here)
+        runner.env.load_state(state_bytes=current_bytes, run_settle_frame=False)
+        runner.restore_log.append({"frame_idx": saved_frame_idx, "recorded": False, "sim": True})
         runner.frame_idx = saved_frame_idx
         runner.facing = saved_facing
         runner.recorder = saved_recorder
@@ -977,10 +986,11 @@ def main() -> None:
     parser.add_argument("--visual-fps", type=int, default=30)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--audit-file", default=None, help="Optional event audit JSON/JSONL; only recommendation=collect events run")
-    parser.add_argument("--max-actions", type=int, default=2500)
+    # action-count defaults rescaled for condition-based pacing (W33 §3.5): ~3x more actions per frame
+    parser.add_argument("--max-actions", type=int, default=7500)
     parser.add_argument("--min-actions", type=int, default=10)
-    parser.add_argument("--stall-actions", type=int, default=120, help="Fail early after this many actions without structural state progress; 0 disables")
-    parser.add_argument("--blocked-nav-actions", type=int, default=8, help="Fail after repeating the same blocked movement this many times; 0 disables")
+    parser.add_argument("--stall-actions", type=int, default=360, help="Fail early after this many actions without structural state progress; 0 disables")
+    parser.add_argument("--blocked-nav-actions", type=int, default=24, help="Fail after repeating the same blocked movement this many times; 0 disables")
     parser.add_argument("--chain", action="store_true", help="Sequentially feed each event's collected final.state into dependent next events")
     parser.add_argument("--world-model", action="store_true", help="Record per-frame full-PPU condition + semantic (world-model dataset)")
     args = parser.parse_args()

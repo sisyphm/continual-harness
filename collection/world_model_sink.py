@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from collection.extractors.entities import entities
+from collection.extractors.ledger_panel import FIELDS as LEDGER_FIELDS, read_ledger
 from collection.extractors.ram import GBAState
 from collection.render_state import BLOCK_SIZES, extract_full_ppu_state, state_from_blocks
 
@@ -41,8 +42,9 @@ class PPUDeltaWriter:
         self.n = 0
         self.bytes_written = 0
 
-    def add(self, frame_idx: int, state: dict) -> None:
-        blob = np.frombuffer(serialize_ppu(state), dtype=np.uint8)
+    def add(self, frame_idx: int, state: dict, blob: bytes | None = None) -> None:
+        # `blob` lets the caller reuse an already-serialized state (no double serialize)
+        blob = np.frombuffer(blob if blob is not None else serialize_ppu(state), dtype=np.uint8)
         if self.prev is None or self.n % self.kfi == 0:
             kind, payload = b"K", blob
         else:
@@ -79,19 +81,76 @@ def extract_objects_v0_legacy(env) -> list:
     return out
 
 
+class LedgerWriter:
+    """W33 §3.3 per-tick ledger: one `ledger_panel.read_ledger` row per real frame,
+    flushed as `ledger/chunk_%06d.npz` every `chunk_frames` (+ partial on close) with an
+    `index.json` schema so consumers never re-derive dtypes/shapes from the arrays."""
+
+    def __init__(self, out_dir: str | Path, chunk_frames: int = 4096):
+        self.dir = Path(out_dir)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.chunk_frames = chunk_frames
+        self.chunks: list = []                  # [filename, start_row, n_rows]
+        self.total = 0
+        self._frame_idx: list[int] = []
+        self._rows: dict[str, list] = {name: [] for name in LEDGER_FIELDS}
+
+    def add(self, frame_idx: int, row: dict) -> None:
+        self._frame_idx.append(frame_idx)
+        for name in LEDGER_FIELDS:
+            self._rows[name].append(row[name])
+        if len(self._frame_idx) >= self.chunk_frames:
+            self._flush()
+
+    def _flush(self) -> None:
+        n = len(self._frame_idx)
+        if n == 0:
+            return
+        arrs = {"frame_idx": np.asarray(self._frame_idx, np.uint32)}
+        for name, (dt, shape) in LEDGER_FIELDS.items():
+            arrs[name] = np.asarray(self._rows[name], dtype=dt).reshape((n, *shape))
+        fn = f"chunk_{len(self.chunks):06d}.npz"
+        np.savez_compressed(self.dir / fn, **arrs)
+        self.chunks.append([fn, self.total, n])
+        self.total += n
+        self._frame_idx = []
+        self._rows = {name: [] for name in LEDGER_FIELDS}
+        # refresh the index on EVERY flush (not only close): a crashed run keeps a
+        # valid schema covering everything flushed so far
+        self._write_index()
+
+    def _write_index(self) -> None:
+        fields = {"frame_idx": {"dtype": "uint32", "shape": []}}
+        for name, (dt, shape) in LEDGER_FIELDS.items():
+            fields[name] = {"dtype": np.dtype(dt).name, "shape": list(shape)}
+        (self.dir / "index.json").write_text(json.dumps(
+            {"chunk_frames": self.chunk_frames, "fields": fields,
+             "chunks": self.chunks, "frames": self.total}))
+
+    def close(self) -> None:
+        self._flush()
+        self._write_index()   # 0-row runs still get a valid (empty) schema
+
+
 class WorldModelSink:
-    """Attach as `runner.frame_hook`: captures full PPU + semantic per real frame."""
+    """Attach as `runner.frame_hook`: captures full PPU + semantic + ledger per real frame."""
 
     def __init__(self, output_dir: str | Path, keyframe_interval: int = 300):
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
         self.ppu = PPUDeltaWriter(out / "ppu_state.bin", keyframe_interval)
         self.sem = (out / "semantic.jsonl").open("w", buffering=1)
+        self.ledger = LedgerWriter(out / "ledger")
         self.frames = 0
 
     def capture(self, runner) -> None:
         env = runner.env
-        self.ppu.add(runner.frame_idx, extract_full_ppu_state(env))
+        ppu = extract_full_ppu_state(env)
+        blob = serialize_ppu(ppu)                # serialized ONCE, shared by both writers
+        self.ppu.add(runner.frame_idx, ppu, blob=blob)
+        # ledger reads the SAME captured blob (not the live env): row == stored frame by
+        # construction, and the window-mask read gets the io/vram blocks it needs.
+        self.ledger.add(runner.frame_idx, read_ledger(GBAState.from_blob(blob)))
         nav = runner.nav_state()
         # objects + facing via the VALIDATED extractor (extractors.entities over the live seam).
         # Runs recorded before 2026-06 carry the legacy garbage objects and input-tracker facing
@@ -111,3 +170,4 @@ class WorldModelSink:
     def close(self) -> None:
         self.ppu.close()
         self.sem.close()
+        self.ledger.close()

@@ -26,7 +26,7 @@ def _hstate(runner, event_id="LIFE_BLOCK"):
     return h
 
 
-def run_block(runner, block, *, max_actions: int = 300) -> dict:
+def run_block(runner, block, *, max_actions: int = 900) -> dict:  # rescaled for condition-based pacing (W33 §3.5)
     """Drive `runner` with `block.act` under the safety wrapper. `block` needs:
        .name, .setup(state)->anchor(x,y,map), .act(state, ctx)->(button|None; None=done)."""
     start_frame = runner.frame_idx
@@ -78,7 +78,104 @@ def run_block(runner, block, *, max_actions: int = 300) -> dict:
                 frames=runner.frame_idx - start_frame)
 
 
-def _return_to_anchor(runner, anchor, name, *, max_actions: int = 120) -> bool:
+def flee_battle(runner, max_actions: int = 40) -> bool:
+    """Escape a wild battle (RUN = bottom-right, then confirm) — collect_coverage's
+    proven `_flee_battle` pattern, local so blocks don't import the coverage collector."""
+    for _ in range(max_actions):
+        for act in ("B", "DOWN", "RIGHT", "A"):
+            runner.perform_action(act, speed="fast", record_end_state=False)
+        if not runner.nav_state().in_battle:
+            return True
+    return not runner.nav_state().in_battle
+
+
+def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict:
+    """W33 §2 wrapper for NAVIGATOR-driven expedition blocks (bfs_sweep, encounter_farm):
+    same safety contract as run_block — precondition (free overworld, no battle/dialog,
+    else skip cleanly), bounded budgets (the block's own frame budgets), forced
+    anchor-return — but the block steers the runner directly through the navigator
+    instead of emitting one button per act, and battles/dialogs are handled INSIDE its
+    machinery (goto interrupts on battle; blocks flee and resume). The block implements
+    `.name`, `.phase` and `.run(runner, mk, ctx) -> summary dict`.
+
+    Recording: `runner.set_phase(block.phase)` stamps every frame + drops the boundary
+    savestate on entry; the phase is restored to "spine" on exit NO MATTER how the block
+    ends, so a block can never mis-tag spine frames."""
+    from collection import navigator as nav
+    if mk is None:
+        mk = nav.MapKnowledge()
+    start_frame = runner.frame_idx
+    # Same settle/precondition seam as run_block. Dialog check is the VISION-validated
+    # heatz one — the raw BG0 window mask false-reads on stale post-close tiles (the
+    # documented no_dialog* limitation) and would veto perfectly clean states.
+    st0 = runner.state()
+    for _ in range(40):                              # settle a spine hand-off script tail
+        if not st0.in_battle and st0.control_mode == "free_overworld" and not is_dialog_open(_hstate(runner)):
+            break
+        runner.step_frame([], phase="block_settle")
+        st0 = runner.state()
+    t, x, y = nav._state(runner)
+    if st0.in_battle or st0.control_mode != "free_overworld" or is_dialog_open(_hstate(runner)) or t is None:
+        return dict(block=block.name, ran=False, reason="precondition_not_overworld",
+                    frames=runner.frame_idx - start_frame)
+    anchor = (f"{t.map_group},{t.map_num}", x, y)
+    runner.set_phase(block.phase)
+    summary: dict = {}
+    try:
+        summary = block.run(runner, mk, {"anchor": anchor})
+    except Exception as e:
+        # block-never-breaks-the-spine: the error is RECORDED, never propagated; the
+        # anchor return + phase restore below still run.
+        summary["error"] = repr(e)
+    returned = False
+    try:
+        returned = _return_to_anchor_nav(runner, mk, anchor, budget=return_budget)
+    except Exception as e:
+        # a second failure must not mask the first — both end up in the summary
+        summary["return_error"] = repr(e)
+    finally:
+        runner.set_phase("spine")
+    # `frames` (in **summary) = the block's own work; frames_total adds settle + return.
+    return dict(block=block.name, ran=True, anchor=list(anchor), returned=returned,
+                frames_total=runner.frame_idx - start_frame, **summary)
+
+
+def _return_to_anchor_nav(runner, mk, anchor, *, budget: int = 30000) -> bool:
+    """Cross-map anchor return for nav blocks (a sweep/farm legitimately ends on another
+    map — base's porymap `find_path_action` return is same-map only)."""
+    from collection import navigator as nav
+    amap, ax, ay = anchor
+    deadline = runner.frame_idx + budget
+
+    def goal(t, beh):
+        import numpy as np
+        m = np.zeros(t.grid.shape, bool)
+        if 0 <= ay + 7 < m.shape[0] and 0 <= ax + 7 < m.shape[1]:
+            m[ay + 7, ax + 7] = True
+        return m
+
+    for _ in range(6):
+        if runner.nav_state().in_battle:
+            flee_battle(runner)
+            continue
+        t, x, y = nav._state(runner)
+        if t is None:
+            nav._hold(runner, [], 30, "block_return")
+            continue
+        if f"{t.map_group},{t.map_num}" == amap and (x, y) == (ax, ay):
+            return True
+        if runner.frame_idx >= deadline:
+            break
+        if f"{t.map_group},{t.map_num}" != amap:
+            nav.goto_map(runner, mk, amap, hop_budget=max(2000, deadline - runner.frame_idx))
+        else:
+            nav.goto(runner, mk, goal, budget=max(2000, deadline - runner.frame_idx),
+                     phase="block_return")
+    t, x, y = nav._state(runner)
+    return t is not None and f"{t.map_group},{t.map_num}" == amap and (x, y) == (ax, ay)
+
+
+def _return_to_anchor(runner, anchor, name, *, max_actions: int = 360) -> bool:  # rescaled for condition-based pacing (W33 §3.5)
     amap, ax, ay = anchor
     for _ in range(max_actions):
         st = runner.state()

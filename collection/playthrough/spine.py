@@ -25,10 +25,11 @@ def run_milestone(
     expected_state,
     postcondition: str,
     start_money: int,
-    max_actions: int = 4000,
+    # action-count defaults rescaled for condition-based pacing (W33 §3.5): ~3x more actions per frame
+    max_actions: int = 12000,
     min_actions: int = 10,
-    stall_actions: int = 400,
-    blocked_nav_actions: int = 40,
+    stall_actions: int = 1200,
+    blocked_nav_actions: int = 120,
     starter: str = "mudkip",
 ) -> dict:
     """Drive `runner` with policy `event_id` until its postcondition. Returns a dict

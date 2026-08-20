@@ -468,8 +468,15 @@ class EmeraldEmulator:
             if self.core is None:
                 raise ValueError(f"Failed to load GBA file: {self.rom_path}")
             
-            # Auto-load save if it exists
-            self.core.autoload_save()
+            # NO .sav on purpose (W33 3b, 2026-08-20): a COMPLETED in-game SAVE with an
+            # autoloaded save VFile segfaults libmgba 0.10 a few hundred frames later
+            # (GBAFrameEnded -> GBASavedataClean -> invalid vf sync; minimal repro:
+            # load any savestate, confirm START->SAVE through "...saved the game.",
+            # run ~500 frames -> SIGSEGV, 100% reproducible; without the VFile the
+            # same flow survives two saves + 12k frames). With no save file the
+            # savedata lives in anonymous memory: the game saves cleanly, and nothing
+            # ever read the throwaway tmp-dir .sav anyway (the ROM is copied to a tmp
+            # dir precisely so the real save file is never touched).
             self.core.reset()
             
             # Get dimensions from the core
@@ -679,8 +686,16 @@ class EmeraldEmulator:
             logger.error(f"Failed to save state: {e}")
             return None
 
-    def load_state(self, path: Optional[str] = None, state_bytes: Optional[bytes] = None):
-        """Load emulator state from file or memory"""
+    def load_state(self, path: Optional[str] = None, state_bytes: Optional[bytes] = None,
+                   run_settle_frame: bool = True):
+        """Load emulator state from file or memory.
+
+        run_settle_frame: run one emulator frame after the raw load. Needed only to
+        refresh the VIDEO buffer (screenshots) — RAM reads are valid immediately
+        (probe-verified 2026-08-20: coords/money/party identical with/without, and
+        load->save round-trips byte-stable without it). Pass False for mid-recording
+        restores so the load is FRAME-NEUTRAL: the settle frame was the hidden
+        unrecorded +1 that broke v1 replay determinism (W33 corpus-v2 §3.2)."""
         if not self.core:
             return
         
@@ -688,13 +703,30 @@ class EmeraldEmulator:
             if path:
                 with open(path, 'rb') as f:
                     state_bytes = f.read()
+            if not state_bytes:
+                raise RuntimeError(f"load_state got no state data (path={path!r})")
             if state_bytes:
                 # Ensure state_bytes is actually bytes
                 if not isinstance(state_bytes, bytes):
                     state_bytes = bytes(state_bytes)
-                self.core.load_raw_state(state_bytes)
+                if not self.core.load_raw_state(state_bytes):
+                    # mgba returns False on a bad/undersized state — a failed restore
+                    # must never silently continue (the emulator keeps the OLD world).
+                    raise RuntimeError(
+                        f"core.load_raw_state rejected the state "
+                        f"({len(state_bytes)} bytes, path={path!r})")
                 logger.info("State loaded.")
-                
+
+                # The emulator-level read cache is only cleared by the frame callback;
+                # a frame-neutral load (run_settle_frame=False) never runs a frame, so
+                # read_memory/read_u8 would serve PRE-load bytes. Clear all emulator
+                # caches unconditionally, in both settle modes.
+                self._mem_cache = {}
+                if hasattr(self, '_cached_state'):
+                    delattr(self, '_cached_state')
+                if hasattr(self, '_cached_state_time'):
+                    delattr(self, '_cached_state_time')
+
                 # Reset dialog tracking and invalidate map cache when loading new state
                 if self.memory_reader:
                     self.memory_reader.reset_dialog_tracking()
@@ -702,10 +734,12 @@ class EmeraldEmulator:
                     self.memory_reader.invalidate_map_cache(clear_buffer_address=False)
                     
                     # Persistent location maps will be loaded from the state file later
-                    
-                    # Run a frame to ensure memory is properly loaded
-                    self.core.run_frame()
-                    
+
+                    if run_settle_frame:
+                        # Refresh the VIDEO buffer (screenshot freshness only — RAM is
+                        # already valid; see docstring). Skipped for frame-neutral restores.
+                        self.core.run_frame()
+
                     # Only find map buffer addresses if we don't have them cached
                     # This avoids expensive memory scanning on every state load
                     if not self.memory_reader._map_buffer_addr:
@@ -742,8 +776,13 @@ class EmeraldEmulator:
             # print( About to call _load_persistent_grids_for_state")
                     self._load_persistent_grids_for_state(path)
             # print( Completed _load_persistent_grids_for_state")
+        except RuntimeError:
+            raise
         except Exception as e:
+            # A failed restore must never silently continue: callers that tolerate a
+            # failed load must catch RuntimeError explicitly.
             logger.error(f"Failed to load state: {e}")
+            raise RuntimeError(f"Failed to load state: {e}") from e
 
     def _save_persistent_grids_for_state(self, state_filename: str):
         """Save persistent location grids for a specific state file"""

@@ -14,13 +14,17 @@ from collection.playthrough.spine import run_milestone
 
 def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-GBAdvance/rom.gba",
                     starter: str = "mudkip", seed: int = 0, record: bool = True,
-                    stop_after: str | None = None, per_milestone_max: int = 6000,
-                    blocks: bool = False) -> dict:
-    from collection.playthrough.schedule import build_schedule
-    from collection.playthrough.blocks.base import run_block
+                    stop_after: str | None = None, per_milestone_max: int = 18000,  # rescaled for condition-based pacing (W33 §3.5)
+                    blocks: bool = False, expedition: list[dict] | None = None) -> dict:
+    from collection.playthrough.schedule import build_expedition_schedule, build_schedule
+    from collection.playthrough.blocks.base import run_block, run_nav_block
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     schedule = build_schedule(seed) if blocks else {}
+    # W33 §2: explicit expedition-block entries ([{after, block, **kwargs}]) merged in.
+    for mid, blks in build_expedition_schedule(expedition or []).items():
+        schedule.setdefault(mid, []).extend(blks)
+    nav_mk = None
     block_log = []
     ce.set_expected_starter(starter.capitalize())       # STARTER_CHOSEN gate holds THIS species
     events = discover_heatz_events(policy_dir)          # ordered, chained
@@ -67,7 +71,13 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     break
                 # Life blocks scheduled after this milestone (diversity injection).
                 for blk in schedule.get(event_id, []):
-                    outcome = run_block(runner, blk)
+                    if hasattr(blk, "run"):          # navigator-driven expedition block (W33)
+                        if nav_mk is None:
+                            from collection.navigator import MapKnowledge
+                            nav_mk = MapKnowledge(rom_path=rom_path)
+                        outcome = run_nav_block(runner, blk, mk=nav_mk)
+                    else:
+                        outcome = run_block(runner, blk)
                     outcome["after"] = event_id
                     block_log.append(outcome)
                     print(json.dumps({"BLOCK": outcome}), flush=True)

@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from collection.actions import ActionTiming, run_action_frames, timing_for, update_facing
+from collection.actions import ActionTiming, PaceProbe, paced_action_frames, run_action_frames, update_facing
 from collection.recorder import ChunkRecorder
 from collection.state import AbstractState, control_mode, location_name, read_compact_state, safe_call
 
@@ -38,6 +38,7 @@ class DirectEmulatorRunner:
         recorder: ChunkRecorder | None = None,
         emulator_fps: int = 80,
         frame_hook=None,
+        savestate_every: int = 4000,
     ):
         self.rom_path = str(rom_path)
         self.load_state = str(load_state) if load_state is not None else None
@@ -51,12 +52,51 @@ class DirectEmulatorRunner:
         self.env = None
         self.frame_idx = 0
         self.last_recorded_state: AbstractState | None = None
+        # W33: every restore is tallied (frame position + whether it was recorded) so
+        # the manifest can prove "no hidden frames" — the replay audit's precondition.
+        self.restore_log: list[dict] = []
+        # W33 §3.4: periodic savestates -> ANY future field derivable by load+short
+        # replay, and runs resumable at block granularity. 0 disables (planning runners).
+        self.savestate_every = savestate_every
+
+    def _save_periodic_state(self) -> None:
+        import zlib
+
+        sb = self.save_state_bytes()
+        if sb is None or self.recorder is None:
+            return
+        d = self.recorder.output_dir / "savestates"
+        d.mkdir(exist_ok=True)
+        (d / f"{self.frame_idx:08d}.state.z").write_bytes(zlib.compress(sb, 6))
+
+    def set_phase(self, phase: str | None) -> None:
+        """W33 §2: director stamps the activity phase; a savestate marks the boundary
+        (block-granular resume + the phase's exact start state on disk)."""
+        if self.recorder is not None:
+            if phase == self.recorder.block_phase:
+                return  # no transition (recorder would no-op) -> no boundary savestate
+            self.recorder.set_block_phase(phase, frame_idx=self.frame_idx)
+            if self.savestate_every:
+                self._save_periodic_state()
 
     def initialize(self) -> None:
         from pokemon_env.emulator import EmeraldEmulator
 
         self.env = EmeraldEmulator(rom_path=self.rom_path)
         self.env.initialize()
+        if self.recorder is not None:
+            # W33 §3.1/§10.3: recording REQUIRES the fixed RTC (wall-clock RTC broke
+            # replay for every pre-2026-06-28 family) and pins the environment.
+            if getattr(self.env, "_pokemon_wm_fixed_rtc_value", None) is None:
+                raise RuntimeError(
+                    "recording without a fixed RTC is forbidden (POKEMON_WM_FIXED_RTC "
+                    "was disabled?) — replay determinism would be silently lost")
+            from collection.provenance import collect_provenance
+
+            self.recorder.manifest["provenance"] = collect_provenance(self.env, self.rom_path)
+            # live reference: close() serializes the final contents of this list
+            self.recorder.manifest["restores"] = self.restore_log
+            self.recorder._write_manifest()
         if self.load_state:
             self.env.load_state(self.load_state)
         self.frame_idx = 0
@@ -161,6 +201,25 @@ class DirectEmulatorRunner:
         self.record_current_frame(phase=phase, metadata=metadata, record_state=record_state, record_visual=True)
         if self.frame_hook is not None:
             self.frame_hook(self)
+        if (self.savestate_every and self.recorder is not None
+                and self.frame_idx % self.savestate_every == 0):
+            self._save_periodic_state()
+
+    def pace_probe(self) -> PaceProbe:
+        """Light per-frame poll for condition-based pacing (W33 §3.5): location/coords
+        from the memory reader + ONE gObjectEvents bus read for mid-step + true facing.
+        Deliberately skips game_state/battle/dialogue (the expensive parts of nav_state)
+        — the pacing predicate only needs tile identity and rest."""
+        assert self.env is not None
+        from collection.extractors.entities import player_pace_read
+
+        reader = getattr(self.env, "memory_reader", None)
+        coords = safe_call(reader.read_coordinates) if reader else None
+        x, y = coords if isinstance(coords, tuple) and len(coords) >= 2 else (None, None)
+        location = location_name(safe_call(reader.read_location) if reader else None)
+        rec = safe_call(lambda: player_pace_read(self.env))
+        mid_step, facing = rec if rec is not None else (False, None)
+        return PaceProbe(pos=(location, x, y), facing=facing, mid_step=bool(mid_step))
 
     def perform_action(
         self,
@@ -171,9 +230,18 @@ class DirectEmulatorRunner:
         metadata: dict[str, Any] | None = None,
         record_end_state: bool = True,
     ) -> AbstractState | None:
-        timing = timing or timing_for(speed)
         self.facing = update_facing(self.facing, action)
-        schedule = run_action_frames(action, timing)
+        if timing is not None:
+            # Explicit fixed schedule: bit-identical to the pre-W33 behavior for any
+            # caller that passes `timing=` (the compatibility contract, W33 §3.5).
+            schedule = run_action_frames(action, timing)
+        else:
+            # W33 §3.5 condition-based pacing: hold while polling until the effect
+            # commits, then settle until stable — see actions.paced_action_frames.
+            # Every polled frame goes through step_frame, so the recording semantics
+            # are unchanged: one action row per frame, buttons = what was really held.
+            # `speed` no longer picks a schedule; it is kept as row provenance.
+            schedule = paced_action_frames(action, self.pace_probe)
         for idx, buttons in enumerate(schedule):
             phase = "hold" if buttons else "release"
             self.step_frame(
@@ -183,7 +251,6 @@ class DirectEmulatorRunner:
                     "action": action,
                     "speed": speed,
                     "schedule_index": idx,
-                    "schedule_length": len(schedule),
                     **(metadata or {}),
                 },
                 record_state=False,
@@ -200,12 +267,18 @@ class DirectEmulatorRunner:
 
     def load_state_bytes(self, state_bytes: bytes, *, record: bool = True) -> None:
         assert self.env is not None
-        self.env.load_state(state_bytes=state_bytes)
-        # load_state runs one emulator frame internally. Keep it silent for BFS restores
-        # so metadata frame ranges describe only collected transitions.
         if record:
+            # recorded restore: settle frame refreshes the video buffer and is COUNTED
+            self.env.load_state(state_bytes=state_bytes)
             self.frame_idx += 1
             self.record_current_frame(phase="restore", record_state=True, record_visual=True)
+        else:
+            # FRAME-NEUTRAL restore (W33 §3.2): no settle frame -> the emulator is
+            # byte-exactly the saved state; nothing hidden ever elapses. This closes
+            # the v1 replay leak (every silent restore used to burn one unrecorded
+            # frame). Restores are tallied for the manifest regardless.
+            self.env.load_state(state_bytes=state_bytes, run_settle_frame=False)
+        self.restore_log.append({"frame_idx": self.frame_idx, "recorded": bool(record)})
 
     def wait_until_stable(
         self,
@@ -237,7 +310,7 @@ class DirectEmulatorRunner:
     def settle_to_free_overworld(
         self,
         *,
-        max_actions: int = 24,
+        max_actions: int = 72,  # rescaled for condition-based pacing (W33 §3.5): ~3x more actions per frame
         metadata: dict[str, Any] | None = None,
     ) -> AbstractState:
         """Clear checkpoint-tail dialogue/menu frames before directional BFS."""

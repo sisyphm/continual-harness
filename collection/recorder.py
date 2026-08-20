@@ -34,7 +34,6 @@ class ChunkRecorder:
         backend: str = "auto",
         max_chunk_visual_frames: int = 10_000,
         metadata: dict[str, Any] | None = None,
-        lean: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.chunks_dir = self.output_dir / "chunks"
@@ -56,13 +55,14 @@ class ChunkRecorder:
         self.backend = backend
         self.ffmpeg_path = ffmpeg_path
 
-        # lean: drop the legacy per-frame state + segment streams (unused by collect_coverage;
-        # semantic/abstract state is derivable from the stored condition). Keeps the dataset clean.
-        self.lean = bool(lean)
         self.frames_file = (self.output_dir / "frames.jsonl").open("w", encoding="utf-8", buffering=1)
         self.actions_file = (self.output_dir / "actions.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.states_file = None if self.lean else (self.output_dir / "states.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.segments_file = None if self.lean else (self.output_dir / "segments.jsonl").open("w", encoding="utf-8", buffering=1)
+        # phase transitions live in their OWN stream (spec §2): actions.jsonl stays
+        # homogeneous — every row is an action row (consumers index buttons_held etc.)
+        self.phases_file = (self.output_dir / "phases.jsonl").open("w", encoding="utf-8", buffering=1)
+        # states/segments are unconditional (spec §3.7)
+        self.states_file = (self.output_dir / "states.jsonl").open("w", encoding="utf-8", buffering=1)
+        self.segments_file = (self.output_dir / "segments.jsonl").open("w", encoding="utf-8", buffering=1)
         self.manifest_path = self.output_dir / "manifest.json"
 
         self.chunk_index = 0
@@ -75,6 +75,7 @@ class ChunkRecorder:
         self._current_chunk_name: str | None = None
         self._closed = False
         self._started = time.monotonic()
+        self.block_phase: str | None = None       # W33 §2 activity tag (see set_block_phase)
 
         self.manifest = {
             "schema_version": 1,
@@ -183,7 +184,9 @@ class ChunkRecorder:
                 "chunk": self._current_chunk_name,
                 "chunk_frame_idx": self.chunk_visual_frame_idx,
                 "state_hash": state_hash,
-                "timestamp": time.time(),
+                # W33 §3.6: no wall-clock in row payloads — byte-identical trajectories
+                # must produce byte-identical rows (replay audit). Run-level timing
+                # lives in the manifest (started_at/ended_at) only.
             },
         )
         self.last_visual_emulator_frame = emulator_frame_idx
@@ -192,21 +195,32 @@ class ChunkRecorder:
 
     def record_action(self, *, frame_idx: int, next_frame_idx: int, buttons: list[str], phase: str, metadata: dict[str, Any] | None = None) -> None:
         normalized = normalize_button_list(buttons)
-        self._write_jsonl(
-            self.actions_file,
-            {
-                "frame_idx": frame_idx,
-                "next_frame_idx": next_frame_idx,
-                "buttons_held": normalized,
-                "button_vec": button_vec(normalized),
-                "phase": phase,
-                "metadata": metadata or {},
-                "timestamp": time.time(),
-            },
-        )
+        row = {
+            "frame_idx": frame_idx,
+            "next_frame_idx": next_frame_idx,
+            "buttons_held": normalized,
+            "button_vec": button_vec(normalized),
+            "phase": phase,
+            "metadata": metadata or {},
+            # no wall-clock (W33 §3.6) — see record_visual_frame
+        }
+        if self.block_phase is not None:
+            row["block_phase"] = self.block_phase   # W33 §2: director-stamped activity tag
+        self._write_jsonl(self.actions_file, row)
+
+    def set_block_phase(self, phase: str | None, *, frame_idx: int) -> None:
+        """W33 §2: director-stamped activity tag. Transitions are logged to phases.jsonl
+        so training can slice by phase (actions.jsonl must stay homogeneous — replay/l1/
+        views and the model repo's loader index action keys on every row); subsequent
+        action rows carry the tag inline."""
+        if phase == self.block_phase:
+            return
+        self.block_phase = phase
+        self._write_jsonl(self.phases_file, {"frame_idx": frame_idx, "phase": phase})
 
     def record_state(self, state: dict[str, Any]) -> None:
         if self.states_file is not None:
+            state = {k: v for k, v in state.items() if k != "timestamp"}  # W33 §3.6
             self._write_jsonl(self.states_file, state)
 
     def record_segment(self, segment: dict[str, Any]) -> None:
@@ -218,7 +232,7 @@ class ChunkRecorder:
             return
         self._finish_chunk()
         self._closed = True
-        for handle in (self.frames_file, self.actions_file, self.states_file, self.segments_file):
+        for handle in (self.frames_file, self.actions_file, self.phases_file, self.states_file, self.segments_file):
             if handle is not None:
                 handle.close()
         self.manifest.update(

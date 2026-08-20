@@ -204,13 +204,28 @@ def _unstick(runner, phase: str = "nav") -> None:
 
 
 def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = "nav",
-         stop_fn=None) -> str:
+         stop_fn=None, visit_fn=None, avoid_fn=None, miss_fn=None) -> str:
     """Walk toward the nearest goal cell; returns 'arrived' | 'battle' | 'stuck' | 'budget'.
     `goal_fn(t, beh) -> bool mask over buffer cells`. Replans every step; the first refused step
     triggers an unstick (script locks), repeated refusals transiently block the cell (NPCs,
     wrong-side ledges) and route around. Blocks EXPIRE (~10 s — a wandering NPC moves on; a
     stale block in a 1-2 cell choke like Route 115's ledge gap otherwise dead-ends the route),
-    and a dead-ended BFS clears them and retries: 'stuck' now means stuck on a CLEAN grid."""
+    and a dead-ended BFS clears them and retries: 'stuck' now means stuck on a CLEAN grid.
+
+    W33 expedition hooks (both optional, both per-replan i.e. per settled tile):
+      visit_fn(t, x, y)      — observe every tile the walk lands on (bfs_sweep's visited set;
+                               a goal_fn that shrinks as visit_fn marks tiles turns one goto
+                               call into a full nearest-unvisited tile tour)
+      avoid_fn(t, beh)->mask — cells the PLAN may never enter (True = forbidden), subtracted
+                               from the walk mask: keeps a sweep inside its map (border strips
+                               are the neighbour's tiles — entering one crosses the connection)
+                               and off warp mats/stairs that fire on step-on.
+      miss_fn(x, y)          — a refused step's TARGET tile (map coords), fired when the miss
+                               gets transiently blocked. Needed because _bfs_step may enter
+                               GOAL cells regardless of the walk mask, so a goal tile occupied
+                               by a parked NPC (Brendan-house mom, measured 2026-08-20: 12
+                               straight refusals, ~9.8k frames) can only be routed around by
+                               the CALLER dropping it from its goal mask."""
     blocked: dict[tuple[int, int], int] = {}                  # cell -> frame of the miss
     start_frame = runner.frame_idx
     misses = 0
@@ -224,6 +239,8 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
             continue
         if stop_fn is not None and (r := stop_fn(t)):
             return r
+        if visit_fn is not None:
+            visit_fn(t, x, y)
         beh = mk.behaviors(t)
         goals = goal_fn(t, beh)
         if goals is None:
@@ -235,6 +252,8 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
         if goals[by, bx]:
             return "arrived"
         walk = ((t.grid >> 10) & 3) == 0
+        if avoid_fn is not None and (av := avoid_fn(t, beh)) is not None:
+            walk &= ~av
         blocked = {c: f for c, f in blocked.items() if runner.frame_idx - f < 600}
         for cx, cy in blocked:
             if 0 <= cy < walk.shape[0] and 0 <= cx < walk.shape[1]:
@@ -256,6 +275,8 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
                 _unstick(runner, phase)                       # the cell (re-fires: an unstick
                 continue                                      # can itself reopen a dialog)
             blocked[(bx + step[0], by + step[1])] = runner.frame_idx   # NPC / ledge: route around
+            if miss_fn is not None:
+                miss_fn(bx + step[0] - 7, by + step[1] - 7)
             if misses >= 8:
                 return "stuck"
             _hold(runner, [], 10, phase)
