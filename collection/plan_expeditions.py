@@ -521,9 +521,14 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
     # RUSTBORO_CENTER_EXITED hops back to the same grass with fresh resources
     # (14 -> 16 is ~15 wins, well inside one PP budget) and delivers the evolution
     # cutscene before the gym. The anchor maps must have land wild tables.
-    _GRIND_LEGS = (              # (stage, grass map key) in spine order, heal between
-        ("ROUTE_104_NORTH", "0,19"),
-        ("RUSTBORO_CENTER_EXITED", "0,31"),   # leg 2 on Route 116 (the map the frozen
+    _GRIND_LEGS = (              # (stage, grass map key, heal center) in spine order
+        ("ROUTE_104_NORTH", "0,19", None),    # leg 1: NO heal trip — Route 104's only
+        #   north crossing is a dialog trap for a one-mon party: Gina & Mia (the double
+        #   at (27,15)-(28,15)) refuse to battle a single starter, and standing in their
+        #   sight line re-opens "Only one POKeMON?" every time, which refuses EVERY step
+        #   (measured: all four directions refused at (27,16), 117k frames burned per
+        #   attempt). Leg 1 grinds what it can and ends honestly at the hp floor.
+        ("RUSTBORO_CENTER_EXITED", "0,31", GRIND_HEAL_CENTER),   # leg 2 on Route 116 (the map the frozen
     )                                         # evolution proof was ground on): hop
     # Rustboro<->116 re-verified live post seam fix (1046/972 frames; the earlier
     # 110k hop burn was the stale-src seam race). 116's Center heal is one
@@ -549,7 +554,7 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                                    ("0,31", 0x777), ("0,31", 0x611),
                                    ("0,31", 0x75D), ("0,31", 0x618)],
     }
-    for _stage, _gmap in _GRIND_LEGS:
+    for _stage, _gmap, _heal in _GRIND_LEGS:
         assert _stage in SAFE_ANCHORS, f"grind leg stage {_stage} not an eligible anchor"
         assert "land" in manifest["wild"].get(_gmap, {}), \
             f"grind leg map {_gmap} has no land wild table"
@@ -557,7 +562,7 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
         cand = sorted((r for r in workers if r["starter"] == st),
                       key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
         for r in cand[:fl["grind_runs_per_starter"]]:
-            for _stage, _gmap in _GRIND_LEGS:
+            for _stage, _gmap, _heal in _GRIND_LEGS:
                 if r["starter"] == "torchic":
                     _tt = _TORCHIC_SWEEPS[_stage]
                     add(r, _stage, "trainer_engagement",
@@ -567,7 +572,7 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                         "encounter", EST_TRAINER_BASE + len(_tt) * EST_TRAINER_FRAMES)
                 add(r, _stage, "grind_evolve",
                     {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
-                     "grass_map": _gmap, "heal_center": GRIND_HEAL_CENTER,
+                     "grass_map": _gmap, "heal_center": _heal,
                      "seed": rng.getrandbits(20)}, "grind_idle", GRIND_FRAMES)
 
     # -- idle / menus sprinkled (deterministic fix-up guarantees the floor)

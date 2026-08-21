@@ -246,6 +246,7 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
     if rng is None:
         rng = getattr(mk, "rng", None)
     blocked: dict[tuple[int, int], int] = {}                  # cell -> frame of the miss
+    refusals: dict[tuple[int, int], int] = {}                 # cell -> times it refused us
     start_frame = runner.frame_idx
     misses = 0
     resets = 0
@@ -273,7 +274,12 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
         walk = ((t.grid >> 10) & 3) == 0
         if avoid_fn is not None and (av := avoid_fn(t, beh)) is not None:
             walk &= ~av
-        blocked = {c: f for c, f in blocked.items() if runner.frame_idx - f < 600}
+        # a cell that refused us TWICE is terrain-like, not a passer-by: hold it far
+        # longer. The flat 600-frame expiry made the walk forget the immovable Gina &
+        # Mia tiles between replans and propose them again forever (measured: 117k
+        # frames of UP/LEFT refusals at (27,16), never once re-routing).
+        blocked = {c: f for c, f in blocked.items()
+                   if runner.frame_idx - f < (6000 if refusals.get(c, 0) >= 2 else 600)}
         for cx, cy in blocked:
             if 0 <= cy < walk.shape[0] and 0 <= cx < walk.shape[1]:
                 walk[cy, cx] = False
@@ -281,19 +287,32 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
                          elev=((t.grid >> 12) & 0xF).astype(np.uint8), beh=beh, rng=rng)
         if step is None:
             if blocked and resets < 4:                        # dead-ended by our own blocks
-                blocked.clear()
+                blocked = {c: f for c, f in blocked.items()   # (keep the immovable ones)
+                           if refusals.get(c, 0) >= 2}
                 resets += 1
                 _hold(runner, [], 60, phase)                  # let the blocking NPC wander off
                 continue
-            return "stuck"
+            # ELEVATION FALLBACK (measured 2026-08-21): the elevation rule is a MODEL,
+            # and when it says "unreachable" while a plain walk says reachable, the game
+            # is the authority — retry blind and let REAL step refusals blacklist cells.
+            # Route 104's north crossing is only reachable this way once the Gina & Mia
+            # double parks on the bridge (a one-mon party can never battle them, so they
+            # never move): strict BFS dead-ended at (27,16) on every attempt and burned
+            # 117k frames, while the spine's pathfinder — which has no elevation model —
+            # crosses there in every clean run.
+            step = _bfs_step(walk, (bx, by), goals, beh=beh, rng=rng)
+            if step is None:
+                return "stuck"
         if _step(runner, DIRS[step]):
             misses = 0
         else:
             misses += 1
+            _cell = (bx + step[0], by + step[1])
+            refusals[_cell] = refusals.get(_cell, 0) + 1
             if misses % 3 == 1:                               # script lock? clear before blaming
                 _unstick(runner, phase)                       # the cell (re-fires: an unstick
                 continue                                      # can itself reopen a dialog)
-            blocked[(bx + step[0], by + step[1])] = runner.frame_idx   # NPC / ledge: route around
+            blocked[_cell] = runner.frame_idx                 # NPC / ledge: route around
             if miss_fn is not None:
                 miss_fn(bx + step[0] - 7, by + step[1] - 7)
             if misses >= 8:
