@@ -132,8 +132,11 @@ class GrindEvolve:
             from collection.playthrough.blocks.base import force_fight
             force_fight(runner)
         await_overworld(runner, phase=self.phase)
-        if nav._dialog_open(runner):             # post-scene leftovers (evolution is over
-            nav._clear_dialog(runner, self.phase)  # once the overworld cb2 is back)
+        # Only clear dialogs once the overworld cb2 is genuinely back: _clear_dialog
+        # mixes a B press every third input, and B CANCELS an evolution in progress —
+        # the one input this block exists to protect.
+        if await_overworld(runner, budget=4000, phase=self.phase) and nav._dialog_open(runner):
+            nav._clear_dialog(runner, self.phase)
         summary["battles"] += 1
         after = read_lead(runner)
         if after is not None and after["experience"] > exp0:
@@ -198,8 +201,17 @@ class GrindEvolve:
                 summary["ended"] = "lead_unreadable"
                 break
             summary["final_level"] = lead["level"]
-            if lead["level"] >= self.target_level:
+            # The goal is the EVOLUTION, not the number. Emerald fires the cutscene on
+            # the level-up that crosses the threshold, and a stray B press cancels it —
+            # measured: exp_016_torchic sat at L16 still species 280 while the block
+            # reported evolved=True and exited. A cancelled evolution gets another
+            # chance on the NEXT level-up, so keep grinding until the species actually
+            # changes (or the budget ends).
+            if lead["level"] >= self.target_level and lead["species"] != start_species:
                 summary["ended"] = "target_level"
+                break
+            if lead["level"] >= self.target_level + 4:
+                summary["ended"] = "level_cap_no_evolution"   # honest, not silent
                 break
             frac = lead["hp"] / lead["max_hp"] if lead["max_hp"] else 1.0
             if frac < self.hp_floor:
@@ -227,7 +239,11 @@ class GrindEvolve:
         if after is not None:
             summary["final_level"] = after["level"]
             summary["levels_gained"] = after["level"] - start_level
-            summary["evolved"] = after["species"] != start_species
+            # only a VALID baseline can prove an evolution; a mid-write read of 0
+            # otherwise makes every species look like a change (exp_016 reported
+            # evolved=True having never left species 280)
+            summary["evolved"] = bool(start_species and after["species"]
+                                      and after["species"] != start_species)
         # walk back to the anchor map ourselves so the XP survives (see above)
         amap = (ctx.get("anchor") or (None,))[0]
         if amap:
