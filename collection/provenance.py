@@ -89,6 +89,23 @@ def mgba_version() -> str:
         return "unknown"
 
 
+PLAN_PATH = "../pokemon-worldmodel/data/processed/w33_expedition_plan.json"
+
+
+def plan_sha256(path: str = PLAN_PATH) -> str:
+    """Content hash of the expedition plan this run is following.
+
+    The plan is EDITABLE and was edited four times during the W33 collection drive
+    (grind legs moved maps, the leg-1 heal was dropped, and the idle/menus rng
+    sprinkle shifted with them), which left banked runs following a schedule the
+    plan file no longer described: 18 of 32 runs disagreed with it. Pin the exact
+    plan bytes per run so the corpus stays self-describing across edits."""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except Exception:
+        return "unknown"
+
+
 def collect_provenance(env, rom_path: str) -> dict:
     """The pin block. `fixed_rtc_value` must be present — DirectEmulatorRunner refuses
     to record without an installed fixed RTC (v1 lesson: wall-clock RTC broke replay
@@ -103,4 +120,5 @@ def collect_provenance(env, rom_path: str) -> dict:
         "env_hash": env_hash(),
         "python": sys.version.split()[0],
         "fixed_rtc_value": getattr(env, "_pokemon_wm_fixed_rtc_value", None),
+        "plan_sha256": plan_sha256(),
     }
