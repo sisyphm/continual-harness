@@ -201,6 +201,18 @@ class GrindEvolve:
             return summary
         start_level, start_species = lead["level"], lead["species"]
         summary["final_level"] = start_level
+        # ALREADY EVOLVED -> do nothing. A second rep cannot change the species, so it
+        # grinds to its whole budget and overshoots the level, and that is destructive:
+        # Combusken learns Double Kick on evolving at 16 and PECK at 17, and the
+        # move-learn prompt takes the first slot — which is Double Kick. Measured on
+        # exp_013 and exp_019: [24,45,116,52] at L16 became [64,45,116,52] at L17, so
+        # the run reaches a ROCK gym having deleted the only move that beats it.
+        _EVOLVED = {278, 279, 281, 282, 284, 285}
+        if start_species in _EVOLVED:
+            summary["ended"] = "already_evolved"
+            summary["evolved"] = True
+            summary["frames"] = runner.frame_idx - f0
+            return summary
         # HEAL BEFORE LEAVING THE ANCHOR (measured): a heal trip that starts deep in
         # the grass fails (wild draws, trainer sight lines, one-way ledges), but the
         # leg-2 anchor stands beside the Rustboro Center — 972 frames, live-verified.
