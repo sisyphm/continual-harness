@@ -561,7 +561,15 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
     for st in STARTERS:
         cand = sorted((r for r in workers if r["starter"] == st),
                       key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
-        for r in cand[:fl["grind_runs_per_starter"]]:
+        # torchic grinds on EVERY run, not just the coverage quota. Grinding was
+        # designed as evolution COVERAGE (a couple of runs per starter), which is
+        # right for mudkip and treecko — water and grass beat a rock gym at L11. A
+        # fire starter cannot: it needs Combusken's Double Kick, i.e. L16. With the
+        # quota, 14 of 16 torchic runs had NO grind block, reached Rustboro Gym at
+        # L11-12 un-evolved, lost to Josh and deadlocked there. That, not the grind
+        # machinery, is why torchic never finished.
+        _n = len(cand) if st == "torchic" else fl["grind_runs_per_starter"]
+        for r in cand[:_n]:
             for _stage, _gmap, _heal in _GRIND_LEGS:
                 # torchic needs L16 (Combusken's Double Kick) to pass a ROCK gym, i.e.
                 # +4 levels from the L12 it arrives with. One grind block reliably
