@@ -317,13 +317,18 @@ def run_milestone(
                 import numpy as _np
                 from collection import navigator as _nav
                 _t, _, _ = _nav._state(runner)
-                if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height \
-                        and ((_t.grid[_gy + 7, _gx + 7] >> 10) & 3) != 0:
+                # NOTE: do NOT require the goal tile to read as unwalkable. NPCs are
+                # OBJECTS, not collision — Roxanne's square (5,3) reads perfectly
+                # walkable in the grid while she stands on it, so that condition was
+                # never true and this recovery never ran. Being stalled on the goal's
+                # own map is enough; targeting the tile AND its neighbours lets BFS
+                # settle for adjacency when the tile itself is occupied.
+                if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
                     _adjacent_once = True
 
                     def _goal(t, beh, gx=_gx, gy=_gy):
                         m = _np.zeros(t.grid.shape, bool)
-                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                        for dx, dy in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)):
                             yy, xx = gy + dy + 7, gx + dx + 7
                             if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
                                 m[yy, xx] = True
