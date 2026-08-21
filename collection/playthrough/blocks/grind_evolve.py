@@ -88,17 +88,34 @@ def read_lead_stable(runner, tries: int = 10) -> dict | None:
     return prev
 
 
+_EVOLVED_FORMS = {278, 279, 281, 282, 284, 285}
+
+
 def await_overworld(runner, *, budget: int = 9000, phase: str = "grind") -> bool:
-    """A-ONLY advance until gMain.callback2 is the overworld again. Covers the battle
-    teardown fade AND the evolution scene (its own cb2) with its dialog chain. Never
-    presses B — B cancels an evolution in progress."""
+    """Advance until gMain.callback2 is the overworld again.
+
+    A-ONLY while the lead can still evolve: B cancels an evolution in progress, the
+    one input this block exists to protect.
+
+    Once the lead is ALREADY an evolved form, evolution cannot be pending, and the
+    danger inverts. Combusken learns PECK at 17 and the move-learn prompt asks which
+    move to forget; A takes the first slot, which is where Double Kick landed on
+    evolving. Measured: [24,45,116,52] at L16 became [64,45,116,52] at L17, leaving a
+    run to fight a ROCK gym with nothing that hurts rock. The level-up can happen
+    mid-gym off Josh's or Roxanne's exp, so declining has to work everywhere, not
+    just during the grind. B answers NO to that prompt."""
     st = GBAState.from_env(runner.env)
+    lead = read_lead(runner)
+    evolved = bool(lead and lead["species"] in _EVOLVED_FORMS)
+    keys = ["A", "A", "B"] if evolved else ["A"]
     f0 = runner.frame_idx
+    i = 0
     while runner.frame_idx - f0 < budget:
         if st.u32(CB2_ADDR) == CB2_OVERWORLD:
             return True
-        nav._hold(runner, ["A"], 4, phase)
+        nav._hold(runner, [keys[i % len(keys)]], 4, phase)
         nav._hold(runner, [], 20, phase)
+        i += 1
     return st.u32(CB2_ADDR) == CB2_OVERWORLD
 
 
