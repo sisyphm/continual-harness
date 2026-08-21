@@ -91,7 +91,9 @@ def run_milestone(
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
     _warped_once = False                  # door search fires at most once per attempt
-    _adjacent_once = False                # blocked-goal walk fires at most once too
+    _adjacent_once = 0                    # blocked-goal walk: up to 3 tries per attempt,
+                                          # because losing the fight it triggers must not
+                                          # disable the only way to reach the trainer
     _adjacent_once = False                # blocked-goal pre-check, likewise
     _warped_once = False                  # wrong-map (door) pre-check, likewise
     t_start_frames = runner.frame_idx
@@ -308,7 +310,7 @@ def run_milestone(
         # and then burned 2,039,665 frames over five attempts without ever starting the
         # fight. Adjacency is all a talk or sight trigger needs. Same stall gate as the
         # other recoveries, so it cannot fire speculatively.
-        if _stuck_pos and not _adjacent_once and expected_state is not None:
+        if _stuck_pos and _adjacent_once < 3 and expected_state is not None:
             _em = getattr(expected_state, "map", None)
             _gx = getattr(expected_state, "x", None)
             _gy = getattr(expected_state, "y", None)
@@ -324,7 +326,7 @@ def run_milestone(
                 # own map is enough; targeting the tile AND its neighbours lets BFS
                 # settle for adjacency when the tile itself is occupied.
                 if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
-                    _adjacent_once = True
+                    _adjacent_once += 1
 
                     def _goal(t, beh, gx=_gx, gy=_gy):
                         m = _np.zeros(t.grid.shape, bool)
