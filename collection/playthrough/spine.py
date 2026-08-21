@@ -87,6 +87,7 @@ def run_milestone(
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map pre-check fires at most once per attempt
+    _adjacent_once = False                # blocked-goal pre-check, likewise
     battle_stall = 0                      # consecutive in-battle iterations with no frames
     nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
     last_frame_seen = runner.frame_idx
@@ -253,6 +254,38 @@ def run_milestone(
                         _how = f"no conn dir {_d}"
                     print(f"spine pre-check: goal ({_gx},{_gy}) off-map "
                           f"{_t.map_width}x{_t.map_height}; {_how} -> {_r}", flush=True)
+        # BLOCKED-GOAL PRE-CHECK (same reasoning as the off-map one above: do not wait
+        # for a stall, because during a dry solve the frame counter keeps moving and no
+        # stall is ever detected). If the goal tile is on THIS map but not walkable, it
+        # is an NPC's own square — TRAINER_JOSH_BATTLE and ROXANNE_BATTLE both target
+        # (5,3) inside RUSTBORO CITY GYM, where Josh stands — so no route can ever end
+        # there and the policy prints 'No progress possible' forever. Adjacency is all
+        # a talk or sight trigger needs, so walk next to it with our navigator.
+        if not _adjacent_once and expected_state is not None:
+            _gx = getattr(expected_state, "x", None)
+            _gy = getattr(expected_state, "y", None)
+            _em = getattr(expected_state, "map", None)
+            if _gx is not None and _gy is not None and _em \
+                    and runner.nav_state().map == _em:
+                import numpy as _np
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height \
+                        and ((_t.grid[_gy + 7, _gx + 7] >> 10) & 3) != 0:
+                    _adjacent_once = True
+
+                    def _goal(t, beh, gx=_gx, gy=_gy):
+                        m = _np.zeros(t.grid.shape, bool)
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            yy, xx = gy + dy + 7, gx + dx + 7
+                            if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
+                                m[yy, xx] = True
+                        return m & (((t.grid >> 10) & 3) == 0)
+
+                    _r = _nav.goto(runner, _nav.MapKnowledge(), _goal,
+                                   budget=12_000, phase="spine")
+                    print(f"spine pre-check: goal ({_gx},{_gy}) is a blocked tile on "
+                          f"{_em}; walked adjacent -> {_r}", flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
