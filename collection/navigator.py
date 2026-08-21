@@ -353,6 +353,23 @@ _CONN_EDGE = {1: ("DOWN", lambda t: t.map_height - 1, "y"), 2: ("UP", 0, "y"),
               3: ("LEFT", 0, "x"), 4: ("RIGHT", lambda t: t.map_width - 1, "x")}
 
 
+def _settle_seam(runner, phase: str) -> None:
+    """Post-crossing stabilization: at a connection seam the map ID flips BEFORE the
+    coordinate re-base (measured live: map=(0,3) with a still-104-based y=59), so an
+    immediate re-route or warp-watch reads a half-updated state — goto_warp captured a
+    stale src, its map-watch fired instantly, and _unstick wandered back across the
+    seam (exp_001 wave-3 heal trip). Hold until two consecutive reads agree on
+    (map, x, y), ~180 frames max."""
+    prev = None
+    for _ in range(6):
+        _hold(runner, [], 30, phase)
+        t, x, y = _state(runner)
+        cur = (None if t is None else (t.map_group, t.map_num), x, y)
+        if t is not None and cur == prev:
+            return
+        prev = cur
+
+
 def cross_connection(runner, mk: MapKnowledge, direction: int, *, budget: int = 8000) -> str:
     """Walk off the map edge in `direction` (a manifest connection); 'crossed' | failures."""
     t0, _, _ = _state(runner)
@@ -363,7 +380,7 @@ def cross_connection(runner, mk: MapKnowledge, direction: int, *, budget: int = 
 
     def crossed(t):
         if (t.map_group, t.map_num) != src:
-            _hold(runner, [], 90, "nav_conn")
+            _settle_seam(runner, "nav_conn")
             return "crossed"
         return None
 
@@ -465,13 +482,16 @@ def goto_warp(runner, mk: MapKnowledge, wx: int, wy: int, *, budget: int = 8000)
     (the first version checked only after arrival and, post-crossing, navigated the NEW map toward
     OLD-map coordinates). Doors that need a push get one in each direction, map-watched."""
     t0, x0, y0 = _state(runner)
+    if t0 is None:                                            # transient seam/fade read —
+        _hold(runner, [], 45, "nav_warp")                     # settle once before giving up
+        t0, x0, y0 = _state(runner)
     if t0 is None:
         return "stuck"
     src = (t0.map_group, t0.map_num)
 
     def crossed(t):
         if (t.map_group, t.map_num) != src:
-            _hold(runner, [], 90, "nav_warp")                 # settle the fade-in
+            _settle_seam(runner, "nav_warp")                  # settle the fade-in
             return "crossed"
         return None
 

@@ -100,7 +100,7 @@ class GrindEvolve:
         every time (leg 1 ended lead_hp_low with zero heal_trip actions) while the
         anchor-return machinery's 6-flee tolerance crosses fine."""
         from collection.playthrough.blocks.base import flee_battle
-        for _ in range(6):
+        for _ in range(12):
             t, _, _ = nav._state(runner)
             if t is None and runner.nav_state().in_battle:
                 # terrain reads None for the whole battle (gBackupMapLayout torn
@@ -213,6 +213,13 @@ class GrindEvolve:
                 summary["heal_failed"] = True
                 if frac < 0.12:                      # hard floor: genuinely faint-risk
                     summary["ended"] = "lead_hp_low"
+                    break
+                # a failed trip strands us off the grass map (exp_001 wave-3: aborted
+                # mid-seam, ground to "grass_unreachable" in the wrong map, then burned
+                # 30k walking back) — return to grass before grinding on. No-op when
+                # already there (_goto_map_safe fast-path returns on a key match).
+                if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
+                    summary["ended"] = "grass_map_unreachable"
                     break
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
             if r == "arrived":
