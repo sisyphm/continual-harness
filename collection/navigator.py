@@ -321,11 +321,47 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
     return "budget"
 
 
-def grass_goal(t: Terrain, beh: np.ndarray | None):
+_MIN_PATCH = 6          # tiles; below this a "patch" cannot hold a walk
+
+
+def grass_goal(t: Terrain, beh: np.ndarray | None, min_patch: int = _MIN_PATCH):
+    """Grass tiles worth walking to — patches big enough to PACE inside.
+
+    Nearest-tile targeting fails on sparse routes. Route 116 measured: a run enters
+    from Rustboro at (0,12) and the closest grass is a SINGLE tile at (5,12) walled
+    in on both sides, so goto_grass reports 'arrived' in 84 frames and pace_grass
+    reports 'left' in 16 — step on, step off, no encounter, forever. The real field
+    is 30+ tiles further south. Dropping patches smaller than `min_patch` sends the
+    walk to grass it can actually move around in."""
     if beh is None:
         return None
     walk = ((t.grid >> 10) & 3) == 0
-    return (beh == GRASS) & walk
+    g = (beh == GRASS) & walk
+    if not g.any():
+        return g
+    # 4-connected components, iterative flood fill (no scipy dependency)
+    seen = np.zeros_like(g)
+    keep = np.zeros_like(g)
+    ys, xs = np.where(g)
+    for sy, sx in zip(ys, xs):
+        if seen[sy, sx]:
+            continue
+        stack = [(sy, sx)]
+        seen[sy, sx] = True
+        comp = []
+        while stack:
+            cy, cx = stack.pop()
+            comp.append((cy, cx))
+            for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ny, nx = cy + dy, cx + dx
+                if 0 <= ny < g.shape[0] and 0 <= nx < g.shape[1] \
+                        and g[ny, nx] and not seen[ny, nx]:
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        if len(comp) >= min_patch:
+            for cy, cx in comp:
+                keep[cy, cx] = True
+    return keep if keep.any() else g          # never strand a grind with no goal
 
 
 WATER = {0x10, 0x11, 0x14, 0x15, 0x16, 0x17}          # pond/sea behavior bytes (bite-validated)
@@ -360,8 +396,14 @@ def pace_grass(runner, mk: MapKnowledge, rng, budget: int = 4000) -> str:
         g = grass_goal(t, mk.behaviors(t))
         if g is None or not g[y + 7, x + 7]:
             return "left"
-        opts = [(dx, dy) for (dx, dy) in DIRS
-                if g[y + 7 + dy, x + 7 + dx]] or list(DIRS)
+        opts = [(dx, dy) for (dx, dy) in DIRS if g[y + 7 + dy, x + 7 + dx]]
+        if not opts:
+            # No grass neighbour: the OLD code fell back to any direction, which
+            # walks straight out of the grass and ends the pace on the next lap.
+            # On a sparse route that is the whole failure — Route 116 measured
+            # 'arrived' in 84 frames then 'left' in 16, over and over, with no
+            # encounter. Hand back to goto_grass, which now targets real patches.
+            return "left"
         dx, dy = rng.choice(opts)
         _step(runner, DIRS[(dx, dy)])
     return "budget"

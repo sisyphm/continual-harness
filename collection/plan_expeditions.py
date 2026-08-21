@@ -581,22 +581,11 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                 # hp floor, so the levels come from REPEATING the proven block at the
                 # Center-adjacent anchor (each one heals there first) instead of from
                 # a trainer sweep, which blew its budget and got rolled back twice.
-                # Route 116's grass is SPARSE — the walker lands on isolated one-tile
-                # patches near the entrance, steps straight back out and triggers no
-                # encounter (measured: goto_grass 'arrived' in 84 frames, pace_grass
-                # 'left' in 16, repeatedly). Its TEN trainers are guaranteed XP and
-                # worth far more per battle, so sweep them before grinding.
-                if r["starter"] == "torchic" and _stage == "RUSTBORO_CENTER_EXITED":
-                    # The FIVE trainers clustered near the Rustboro entrance
-                    # (x=12..28): ids 322, 617, 280, 605, 273. Route 116's other five
-                    # (695, 694, 631, 754, 753) sit at x=33..42 by Rusturf Tunnel — a
-                    # long walk past a gated area, and not the ones a player actually
-                    # fights coming through. Owner's count from playing it: about five.
-                    _t116 = [0x642, 0x769, 0x618, 0x75D, 0x611]
-                    add(r, _stage, "trainer_engagement",
-                        {"targets": [{"map": "0,31", "trainer_flag": f} for f in _t116],
-                         "frames": 200_000, "seed": rng.getrandbits(20)},
-                        "encounter", EST_TRAINER_BASE + len(_t116) * EST_TRAINER_FRAMES)
+                # Wild-only levelling (owner's call): fewer moving parts than a
+                # trainer sweep, which depends on per-trainer reachability and on
+                # winning each fight. The sparse-grass failure is fixed at the walk
+                # instead — grass_goal targets patches big enough to pace inside and
+                # pace_grass no longer steps out of them.
                 _reps = 2 if (r["starter"] == "torchic"
                               and _stage == "RUSTBORO_CENTER_EXITED") else 1
                 for _rep in range(_reps):
