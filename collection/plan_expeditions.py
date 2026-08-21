@@ -587,7 +587,12 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                 # 'left' in 16, repeatedly). Its TEN trainers are guaranteed XP and
                 # worth far more per battle, so sweep them before grinding.
                 if r["starter"] == "torchic" and _stage == "RUSTBORO_CENTER_EXITED":
-                    _t116 = [0x769, 0x642, 0x777, 0x611, 0x75D, 0x618]
+                    # The FIVE trainers clustered near the Rustboro entrance
+                    # (x=12..28): ids 322, 617, 280, 605, 273. Route 116's other five
+                    # (695, 694, 631, 754, 753) sit at x=33..42 by Rusturf Tunnel — a
+                    # long walk past a gated area, and not the ones a player actually
+                    # fights coming through. Owner's count from playing it: about five.
+                    _t116 = [0x642, 0x769, 0x618, 0x75D, 0x611]
                     add(r, _stage, "trainer_engagement",
                         {"targets": [{"map": "0,31", "trainer_flag": f} for f in _t116],
                          "frames": 200_000, "seed": rng.getrandbits(20)},
