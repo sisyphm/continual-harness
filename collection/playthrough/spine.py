@@ -90,12 +90,12 @@ def run_milestone(
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
-    _warped_once = False                  # door search fires at most once per attempt
     _adjacent_once = 0                    # blocked-goal walk: up to 3 tries per attempt,
                                           # because losing the fight it triggers must not
                                           # disable the only way to reach the trainer
     _adjacent_once = False                # blocked-goal pre-check, likewise
-    _warped_once = False                  # wrong-map (door) pre-check, likewise
+    _warped_tries = 0                     # wrong-map (door) search: up to 3 per attempt
+    _wrongmap = 0                         # consecutive iterations spent on the WRONG map
     t_start_frames = runner.frame_idx
     battle_stall = 0                      # consecutive in-battle iterations with no frames
     nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
@@ -255,6 +255,15 @@ def run_milestone(
         if len(_recent) > 200:
             _recent.pop(0)
         _stuck_pos = len(_recent) if (len(_recent) >= 200 and len(set(_recent)) <= 4) else 0
+        # Dwell on the WRONG map. The position window above only catches a walk that has
+        # gone still, but a policy pathing to a goal that lives on another map wanders a
+        # whole city and never looks stuck: measured, ROXANNE_BATTLE burned all 6000
+        # actions printing "No progress possible toward (5, 3)" from outside the gym,
+        # because (5,3) exists in RUSTBORO CITY too. Time spent on the wrong map is the
+        # honest signal, and it cannot fire on a milestone already standing where it
+        # belongs.
+        _em_now = getattr(expected_state, "map", None) if expected_state is not None else None
+        _wrongmap = (_wrongmap + 1) if (_em_now and runner.nav_state().map != _em_now) else 0
         _last_pos = _pos
         if _stuck_pos and not _crossed_once and expected_state is not None:
             _gx = getattr(expected_state, "x", None)
@@ -282,13 +291,15 @@ def run_milestone(
         # walk has visited four tiles or fewer for 200 iterations, and only when the
         # map NAME disagrees. Try this map's doors until the name matches, stepping
         # back out of any wrong building.
-        if _stuck_pos and not _warped_once and expected_state is not None:
+        if (_stuck_pos or _wrongmap >= 600) and _warped_tries < 3 \
+                and expected_state is not None:
             _em = getattr(expected_state, "map", None)
             if _em and runner.nav_state().map != _em:
                 from collection import navigator as _nav
                 _t, _, _ = _nav._state(runner)
                 if _t is not None:
-                    _warped_once = True
+                    _warped_tries += 1
+                    _wrongmap = 0
                     _mk = _nav.MapKnowledge()
                     _key = f"{_t.map_group},{_t.map_num}"
                     for _wp in (_mk.warps.get(_key) or [])[:8]:

@@ -41,6 +41,7 @@ from collection.extractors.ledger_panel import (
 from collection.extractors.ram import GBAState
 
 
+_NURSE = (7, 2)              # nurse's own tile: talk ACROSS the counter, never path to it
 _RETURN_RESERVE = 60_000     # frames held back for the walk home (116->Rustboro = 972)
 
 
@@ -160,28 +161,78 @@ class GrindEvolve:
         from collection.playthrough.blocks.base import goto_map_safe
         return goto_map_safe(runner, mk, key, deadline)
 
+    def _release_dialog(self, runner, tries: int = 40) -> bool:
+        """Step out of the nurse's closing dialog before anyone tries to walk.
+
+        The heal loop returns the moment HP reads full, which is DURING the nurse's
+        sign-off text, and an open dialog freezes movement. Measured: the lead healed
+        to 50/50 and was then pinned at (7,4) for 93,157 frames while goto_warp and the
+        anchor return both reported "stuck" -- and a block that ends off its anchor map
+        has every earned level discarded by base's restore, so a working heal that
+        cannot leave is WORSE than no heal at all. nav._clear_dialog does not close this
+        one (still open after 1000 frames); the same confirm action that drove the heal
+        does. With this, the same trip ends on RUSTBORO CITY at 50/50 in 5,551 frames.
+        """
+        from collection.playthrough.blocks.base import _hstate
+        from collection.heatz_adapter import is_dialog_open, navigate_ui
+        from collection.actions import normalize_action
+        from collection import navigator as _nav
+        for _ in range(tries):
+            h = _hstate(runner)
+            if is_dialog_open(h):
+                runner.perform_action(normalize_action(navigate_ui(h, intent="confirm")),
+                                      metadata={"block": self.name, "src": "heal_trip"})
+                continue
+            if _nav._step(runner, "down"):
+                return True
+            runner.perform_action("B", metadata={"block": self.name, "src": "heal_trip"})
+        return False
+
     def _heal_at_center(self, runner, mk, deadline: int) -> bool:
         """Nurse-heal trip: enter the Center, walk to the nurse at (7, 2) — the
         pathfinder auto-presses A when adjacent and facing an NPC — and confirm
         dialogs until the lead reads full HP (the nurse restores PP with it, the
         actual sustain constraint). Bounded by actions and the caller's deadline."""
         from collection.playthrough.blocks.base import _hstate
-        from collection.heatz_adapter import find_path_action, is_dialog_open, navigate_ui
+        from collection.heatz_adapter import is_dialog_open, navigate_ui
         from collection.actions import normalize_action
+        from collection import navigator as _nav
         if not self._goto_map_safe(runner, mk, self.heal_center, deadline):
             return False
-        for _ in range(160):
+        # DO NOT path TO the nurse. She stands at (7,2), which is walkable in the grid
+        # but sealed off behind her counter -- the Center's row y=3 reads "....######...."
+        # so BFS can never reach her, and the old find_path_action(h, 7, 2) spun its full
+        # 160 actions printing "Goal (7, 2) is STILL BLOCKED" and healed NOTHING. That is
+        # why every heal trip silently no-opped: measured, a lead went into this function
+        # at 27/50 and came out at 27/50.
+        # Walking toward her and talking ACROSS the counter is what actually works:
+        # from the door at (7,8) the walk stops at (7,4) and A opens the nurse dialog.
+        # Measured on that same lead: 27/50 -> 50/50 in 69 iterations.
+        for _ in range(200):
             if runner.frame_idx >= deadline:
-                return False
+                break
             lead = read_lead(runner)
             if lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"]:
+                self._release_dialog(runner)
                 return True
             h = _hstate(runner)
-            act = navigate_ui(h, intent="confirm") if is_dialog_open(h) else find_path_action(h, 7, 2)
-            runner.perform_action(normalize_action(act),
-                                  metadata={"block": self.name, "src": "heal_trip"})
+            if is_dialog_open(h):
+                runner.perform_action(normalize_action(navigate_ui(h, intent="confirm")),
+                                      metadata={"block": self.name, "src": "heal_trip"})
+                continue
+            _t, _cx, _cy = _nav._state(runner)
+            if _t is None:
+                runner.perform_action("A", metadata={"block": self.name, "src": "heal_trip"})
+                continue
+            _dx, _dy = _NURSE[0] - _cx, _NURSE[1] - _cy
+            _face = ("UP" if _dy < 0 else "DOWN" if _dy > 0
+                     else "LEFT" if _dx < 0 else "RIGHT")
+            runner.perform_action(_face, metadata={"block": self.name, "src": "heal_trip"})
+            runner.perform_action("A", metadata={"block": self.name, "src": "heal_trip"})
         lead = read_lead(runner)
-        return bool(lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"])
+        _full = bool(lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"])
+        self._release_dialog(runner)     # never hand back a frozen, dialog-locked run
+        return _full
 
     def _fight(self, runner, rng, summary: dict, exp0: int) -> None:
         # Drive the battle from RAM directly rather than through the heatz machine.
