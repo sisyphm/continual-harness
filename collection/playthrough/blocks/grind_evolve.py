@@ -365,6 +365,18 @@ class GrindEvolve:
             # evolved=True having never left species 280)
             summary["evolved"] = bool(start_species and after["species"]
                                       and after["species"] != start_species)
+        # LEAVE CLEANLY. base restores the entry savestate when the block ends in a
+        # battle or out of the overworld, even if we are standing on the right map —
+        # and that restore discards every level earned. Measured across 40 grind
+        # blocks tonight: 32 returned false and 3 were rolled back, while
+        # anchor_return_failed stayed 0, i.e. the map was never the problem; the block
+        # was simply still mid-battle when it stopped. exp_043 lost 34 wins that way.
+        if runner.nav_state().in_battle:
+            from collection.playthrough.blocks.base import force_fight
+            force_fight(runner)
+        await_overworld(runner, budget=6000, phase=self.phase)
+        if nav._dialog_open(runner):
+            nav._clear_dialog(runner, self.phase)
         # walk back to the anchor map ourselves so the XP survives (see above)
         amap = (ctx.get("anchor") or (None,))[0]
         if amap:
