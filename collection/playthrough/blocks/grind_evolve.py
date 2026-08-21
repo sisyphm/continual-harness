@@ -133,6 +133,8 @@ class GrindEvolve:
         after = read_lead(runner)
         if after is not None and after["experience"] > exp0:
             summary["battles_won"] += 1
+        elif after is not None and after["max_hp"] and after["hp"] == after["max_hp"]:
+            summary["whiteouts"] = summary.get("whiteouts", 0) + 1   # the free heal
 
     def run(self, runner, mk, ctx) -> dict:
         rng = random.Random(self.seed)
@@ -175,6 +177,17 @@ class GrindEvolve:
             summary["frames"] = runner.frame_idx - f0
             return summary
         while runner.frame_idx < grind_until:
+            # A whiteout drops us at the Center, so the grass map is re-established
+            # every lap rather than assumed (no-op when we are already standing on it).
+            if self.grass_map:
+                _t, _, _ = nav._state(runner)
+                _cur = None if _t is None else f"{_t.map_group},{_t.map_num}"
+                if _cur != self.grass_map:
+                    if _cur is not None and _cur != self.heal_center:
+                        pass
+                    if not self._goto_map_safe(runner, mk, self.grass_map, grind_until):
+                        summary["ended"] = "grass_map_unreachable"
+                        break
             lead = read_lead(runner)
             if lead is None:
                 summary["ended"] = "lead_unreadable"
@@ -185,34 +198,15 @@ class GrindEvolve:
                 break
             frac = lead["hp"] / lead["max_hp"] if lead["max_hp"] else 1.0
             if frac < self.hp_floor:
-                if self.heal_center and runner.nav_state().in_battle:
-                    # the previous fight can leave a live battle behind (PP-starved
-                    # driver + bounded await): the heal trip must start overworld
-                    from collection.playthrough.blocks.base import flee_battle
-                    flee_battle(runner)
-                # ONE bounded heal attempt (25k cap — a failed cross-map trip burned
-                # 117k measured); failure is NOT fatal above the hard floor: keep
-                # grinding low — a whiteout self-heals at the Center by game rules.
-                if (self.heal_center and summary.get("heals", 0) < self.max_heals
-                        and not summary.get("heal_failed")
-                        and self._heal_at_center(runner, mk,
-                                                 min(deadline, runner.frame_idx + 25_000))):
-                    summary["heals"] = summary.get("heals", 0) + 1
-                    if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
-                        summary["ended"] = "grass_map_unreachable"
-                        break
-                    continue                         # fresh HP+PP: keep grinding
-                summary["heal_failed"] = True
-                if frac < 0.12:                      # hard floor: genuinely faint-risk
-                    summary["ended"] = "lead_hp_low"
-                    break
-                # a failed trip strands us off the grass map (exp_001 wave-3: aborted
-                # mid-seam, ground to "grass_unreachable" in the wrong map, then burned
-                # 30k walking back) — return to grass before grinding on. No-op when
-                # already there (_goto_map_safe fast-path returns on a key match).
-                if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
-                    summary["ended"] = "grass_map_unreachable"
-                    break
+                # NO heal trip from here. Every measured attempt that started inside
+                # the grass failed and burned 25-117k frames: Route 104's crossing is
+                # a dialog trap for a one-mon party, and the Route 116 walk draws wild
+                # battles and trainer sight lines. The game already has a free, always
+                # available heal — faint. A whiteout teleports us to the Center with
+                # HP and PP fully restored, the loop head walks back to the grass, and
+                # the grind continues. It costs money we never spend, and a whiteout is
+                # authentic play that the corpus should contain anyway.
+                summary["low_hp_laps"] = summary.get("low_hp_laps", 0) + 1
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
             if r == "arrived":
                 r = nav.pace_grass(runner, mk, rng,
