@@ -88,6 +88,8 @@ def run_milestone(
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map pre-check fires at most once per attempt
     _adjacent_once = False                # blocked-goal pre-check, likewise
+    _warped_once = False                  # wrong-map (door) pre-check, likewise
+    t_start_frames = runner.frame_idx
     battle_stall = 0                      # consecutive in-battle iterations with no frames
     nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
     last_frame_seen = runner.frame_idx
@@ -286,6 +288,40 @@ def run_milestone(
                                    budget=12_000, phase="spine")
                     print(f"spine pre-check: goal ({_gx},{_gy}) is a blocked tile on "
                           f"{_em}; walked adjacent -> {_r}", flush=True)
+        # WRONG-MAP GOAL reachable only through a DOOR. The goal is not off-map (so the
+        # connection pre-check misses it) and is walkable here (so the blocked-tile one
+        # misses it) — it simply belongs to another map. Measured: exp_013 stood in
+        # RUSTBORO CITY at (16,39) pathing to (5,3) in RUSTBORO CITY GYM, a tile that
+        # also exists in the city, so the policy walked confidently to the wrong place
+        # forever. There is no map-name -> map-key table, but we do not need one: try
+        # this map's warps until the map NAME matches what the milestone expects.
+        if not _warped_once and expected_state is not None:
+            _em = getattr(expected_state, "map", None)
+            if _em and runner.nav_state().map != _em:
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None:
+                    _mk = _nav.MapKnowledge()
+                    _key = f"{_t.map_group},{_t.map_num}"
+                    _warps = (_mk.warps.get(_key) or [])[:8]
+                    _warped_once = True
+                    for _wp in _warps:
+                        if runner.frame_idx - t_start_frames > 60_000:
+                            break
+                        _r = _nav.goto_warp(runner, _mk, _wp["x"], _wp["y"], budget=6_000)
+                        if runner.nav_state().map == _em:
+                            print(f"spine pre-check: entered {_em} via warp "
+                                  f"({_wp['x']},{_wp['y']})", flush=True)
+                            break
+                        if _r == "crossed":          # wrong building — step back out
+                            _t2, _, _ = _nav._state(runner)
+                            _k2 = None if _t2 is None else f"{_t2.map_group},{_t2.map_num}"
+                            _back = (_mk.warps.get(_k2) or [])[:1]
+                            if _back:
+                                _nav.goto_warp(runner, _mk, _back[0]["x"], _back[0]["y"],
+                                               budget=6_000)
+                    else:
+                        print(f"spine pre-check: no warp on {_key} led to {_em}", flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
