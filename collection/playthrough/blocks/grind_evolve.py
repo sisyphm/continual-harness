@@ -126,6 +126,11 @@ class GrindEvolve:
     def _fight(self, runner, rng, summary: dict, exp0: int) -> None:
         from collection.collect_behaviors import _battle_one
         _battle_one(runner, rng, "fight")
+        if runner.nav_state().in_battle:
+            # the heatz battle machine can leave a trainer battle unresolved (its party
+            # reader throws on some in-battle states); drive the menus from RAM instead
+            from collection.playthrough.blocks.base import force_fight
+            force_fight(runner)
         await_overworld(runner, phase=self.phase)
         if nav._dialog_open(runner):             # post-scene leftovers (evolution is over
             nav._clear_dialog(runner, self.phase)  # once the overworld cb2 is back)

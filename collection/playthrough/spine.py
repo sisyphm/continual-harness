@@ -114,8 +114,13 @@ def run_milestone(
         # PROVEN stall (in battle, frame counter frozen across iterations), so a
         # healthy battle keeps whatever the policy was doing.
         if runner.nav_state().in_battle:
-            battle_stall = battle_stall + 1 if runner.frame_idx == last_frame_seen else 0
-            if battle_stall >= 8:
+            # Count TIME IN BATTLE, not frozen frames. A deadlocked trainer battle
+            # still burns frames in its input holds (measured: exp_001 sat in one
+            # battle for 41k ticks at 3 HP, experience frozen at 1890, while stepping
+            # 10k frames/70s — so a frame-progress check called it healthy). A real
+            # battle resolves in a few hundred iterations; thousands means deadlock.
+            battle_stall += 1
+            if battle_stall >= 240:
                 from collection.playthrough.blocks.base import force_fight
                 from collection.playthrough.blocks.grind_evolve import await_overworld
                 if force_fight(runner):
