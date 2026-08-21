@@ -260,7 +260,18 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     starter: str = "mudkip", seed: int = 0, record: bool = True,
                     stop_after: str | None = None, per_milestone_max: int = 18000,  # rescaled for condition-based pacing (W33 §3.5)
                     blocks: bool = False, expedition: list[dict] | None = None,
-                    persona: dict | None = None, max_attempts: int = 5) -> dict:
+                    persona: dict | None = None, max_attempts: int = 5,
+                    resume_state: str | None = None,
+                    resume_after: str | None = None) -> dict:
+    """...
+
+    RESUME (W33): `resume_state` is a savestate written by an earlier attempt and
+    `resume_after` the last milestone that attempt completed. A run that dies at
+    milestone 46 after ninety minutes should not replay the whole game to test a
+    one-line fix — it should carry on from just before where it broke. The seam is
+    recorded in the manifest (resumed_from / resume_frame / resume_after) because a
+    resumed run is frames A..B from one build and B..C from another, and that has to
+    be visible to anything that reads the corpus rather than inferred later."""
     from collection.playthrough.schedule import build_expedition_schedule, build_schedule
     from collection.playthrough.blocks.base import run_block, run_nav_block
     out = Path(out_dir)
@@ -297,15 +308,37 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         if sink is not None:
             runner.frame_hook = sink.capture
         # Boot past the title screen: mash A/START until GAME_RUNNING (new game begins).
-        # Boot is recorded live (pre-spine); solve-then-record starts with the milestones.
-        for _ in range(600):
-            runner.step_frame(["a"], phase="boot")
-            st = runner.state()
-            if st.game_state not in ("title", "intro", None):
-                break
+        if resume_state:
+            import zlib
+            raw = open(resume_state, "rb").read()
+            runner.load_state_bytes(zlib.decompress(raw) if resume_state.endswith(".z") else raw,
+                                    record=True)
+            for _ in range(60):
+                runner.step_frame([], phase="resume")
+            if record:
+                recorder.manifest["resumed_from"] = resume_state
+                recorder.manifest["resume_after"] = resume_after
+                recorder.manifest["resume_frame"] = runner.frame_idx
+                recorder._write_manifest()
+            print(json.dumps({"RESUME": {"state": resume_state, "after": resume_after,
+                                         "frame": runner.frame_idx}}), flush=True)
+        else:
+            # Boot is recorded live (pre-spine); solve-then-record starts with milestones.
+            for _ in range(600):
+                runner.step_frame(["a"], phase="boot")
+                st = runner.state()
+                if st.game_state not in ("title", "intro", None):
+                    break
         start_money = 0
         try:
+            _skip = bool(resume_after)
             for event_id in order:
+                if _skip:                      # already done by the attempt we resumed
+                    if event_id == resume_after:
+                        _skip = False
+                    results.append({"event_id": event_id, "validation": "skipped",
+                                    "failure_reason": "resumed_past"})
+                    continue
                 exp = ce._load_expected_state(rom_path=rom_path,
                                               completed_state=by_id[event_id].get("completed_state"),
                                               event_id=event_id)
