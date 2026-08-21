@@ -581,6 +581,17 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                 # hp floor, so the levels come from REPEATING the proven block at the
                 # Center-adjacent anchor (each one heals there first) instead of from
                 # a trainer sweep, which blew its budget and got rolled back twice.
+                # Route 116's grass is SPARSE — the walker lands on isolated one-tile
+                # patches near the entrance, steps straight back out and triggers no
+                # encounter (measured: goto_grass 'arrived' in 84 frames, pace_grass
+                # 'left' in 16, repeatedly). Its TEN trainers are guaranteed XP and
+                # worth far more per battle, so sweep them before grinding.
+                if r["starter"] == "torchic" and _stage == "RUSTBORO_CENTER_EXITED":
+                    _t116 = [0x769, 0x642, 0x777, 0x611, 0x75D, 0x618]
+                    add(r, _stage, "trainer_engagement",
+                        {"targets": [{"map": "0,31", "trainer_flag": f} for f in _t116],
+                         "frames": 200_000, "seed": rng.getrandbits(20)},
+                        "encounter", EST_TRAINER_BASE + len(_t116) * EST_TRAINER_FRAMES)
                 _reps = 2 if (r["starter"] == "torchic"
                               and _stage == "RUSTBORO_CENTER_EXITED") else 1
                 for _rep in range(_reps):

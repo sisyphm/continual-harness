@@ -185,7 +185,17 @@ def test_scheduler_trainer_rows_and_boundaries():
         for idx, name, args in r["block_schedule"]:
             if name != "trainer_engagement":
                 continue
-            assert not r["holdout"], "trainer blocks must ride non-holdout runs"
+            # Coverage trainer blocks stay off holdout runs. The exception is
+            # torchic's Route 116 sweep at RUSTBORO_CENTER_EXITED, which is not
+            # coverage at all: 116's grass is sparse enough that the walker steps
+            # straight back out of it, so its trainers are how a torchic run reaches
+            # L16 and evolves. A holdout run still has to CLEAR the game.
+            _progression = (r["starter"] == "torchic"
+                            and all(t["map"] == "0,31" for t in args["targets"]))
+            assert not r["holdout"] or _progression, \
+                "coverage trainer blocks must ride non-holdout runs"
+            if r["holdout"]:
+                continue          # holdout runs never count toward coverage tallies
             for t in args["targets"]:
                 per_flag.setdefault(t["trainer_flag"], set()).add(r["run_id"])
     optional = [f for f in TRACKED_TRAINER_FLAGS if f not in SPINE_TRAINER_FLAGS]

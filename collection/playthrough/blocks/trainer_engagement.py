@@ -158,8 +158,15 @@ class TrainerEngagement:
     def _fight(self, runner, rng, summary) -> None:
         """One battle through the heatz machine, then the evolve-safe A-only watch
         (trainer exp can evolve the lead) and a leftover-box sweep."""
-        from collection.collect_behaviors import _battle_one
-        _battle_one(runner, rng, "fight")
+        # Drive the battle from RAM. A TRAINER battle is exactly where the heatz
+        # machine hangs — RUN is refused and its party reads throw — and it does not
+        # return, so nothing placed after it can rescue the run. Trainers are the whole
+        # point of this block, so it must not use the path that deadlocks on them.
+        from collection.playthrough.blocks.base import force_fight
+        force_fight(runner)
+        if runner.nav_state().in_battle:
+            from collection.collect_behaviors import _battle_one
+            _battle_one(runner, rng, "fight")
         summary["battles"] += 1
         await_overworld(runner, phase=self.phase)
         if nav._dialog_open(runner):                 # post-battle speech leftovers
