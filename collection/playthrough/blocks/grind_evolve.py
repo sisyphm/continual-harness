@@ -184,6 +184,7 @@ class GrindEvolve:
             summary["ended"] = "no_grass"
             summary["frames"] = runner.frame_idx - f0
             return summary
+        _stuck = 0
         while runner.frame_idx < grind_until:
             # A whiteout drops us at the Center, so the grass map is re-established
             # every lap rather than assumed (no-op when we are already standing on it).
@@ -231,9 +232,18 @@ class GrindEvolve:
             if r == "battle":
                 self._fight(runner, rng, summary, lead["experience"])
             elif r == "stuck":
-                summary["skipped"].append(dict(reason="grass unreachable from here"))
-                summary["ended"] = "grass_unreachable"
-                break
+                # Not necessarily terminal: the walk can be blocked by a passer-by, or
+                # by our own transient refusal marks. Measured cost of quitting on the
+                # first stuck: exp_019_torchic burned 36.7k frames and won ZERO battles
+                # at anchor (10,30), then met the gym under-levelled. Give the grid a
+                # few seconds to change and try again before writing the block off.
+                _stuck += 1
+                if _stuck >= 4:
+                    summary["skipped"].append(dict(reason="grass unreachable from here"))
+                    summary["ended"] = "grass_unreachable"
+                    break
+                nav._unstick(runner, self.phase)
+                nav._hold(runner, [], 240, self.phase)
             # 'left'/'budget': loop — the deadline governs
         after = read_lead(runner)
         if after is not None:
