@@ -337,10 +337,18 @@ class GrindEvolve:
                 # authentic play that the corpus should contain anyway.
                 summary["low_hp_laps"] = summary.get("low_hp_laps", 0) + 1
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
+            _where = "goto_grass"
             if r == "arrived":
+                _where = "pace_grass"
                 r = nav.pace_grass(runner, mk, rng,
                                    budget=min(6000, deadline - runner.frame_idx))
             if r == "battle":
+                # Reaching a battle PROVES the walk works, so the stuck budget starts
+                # over. Without this reset the counter below is cumulative across the
+                # whole block: four transient stucks scattered over 200k frames retire
+                # a run that is otherwise grinding fine. Measured — exp_040 and
+                # exp_049 both quit at f=38120 with 81% of their budget unspent.
+                _stuck = 0
                 self._fight(runner, rng, summary, lead["experience"])
             elif r == "stuck":
                 # Not necessarily terminal: the walk can be blocked by a passer-by, or
@@ -349,12 +357,21 @@ class GrindEvolve:
                 # at anchor (10,30), then met the gym under-levelled. Give the grid a
                 # few seconds to change and try again before writing the block off.
                 _stuck += 1
-                if _stuck >= 4:
-                    summary["skipped"].append(dict(reason="grass unreachable from here"))
-                    summary["ended"] = "grass_unreachable"
-                    break
+                summary["last_stuck_at"] = _where
                 nav._unstick(runner, self.phase)
                 nav._hold(runner, [], 240, self.phase)
+                if _stuck in (4, 8) and self.grass_map:
+                    # Heavier recovery before writing the block off: re-enter the grass
+                    # map outright, which clears our own refusal marks and shakes off an
+                    # NPC parked on the path. Quitting at four burned only 19% of the
+                    # budget and banked nothing; the walk itself is known-good from both
+                    # the expert anchor (412f) and the failing savestate (444f).
+                    self._goto_map_safe(runner, mk, self.grass_map,
+                                        min(grind_until, runner.frame_idx + 20_000))
+                if _stuck >= 12:
+                    summary["skipped"].append(dict(reason=f"stuck in {_where}"))
+                    summary["ended"] = "grass_unreachable"
+                    break
             # 'left'/'budget': loop — the deadline governs
         after = read_lead_stable(runner)
         if after is not None:
@@ -365,6 +382,26 @@ class GrindEvolve:
             # evolved=True having never left species 280)
             summary["evolved"] = bool(start_species and after["species"]
                                       and after["species"] != start_species)
+        # HEAL BEFORE HANDING BACK. A grind ends whenever its budget or target says so,
+        # which is usually at low HP — and the next thing a torchic run does is walk
+        # into a GYM. Measured: a run reached Roxanne, triggered the fight at 16/49 HP
+        # and lost. The Center is one warp from this block's own anchor (972 frames,
+        # live-verified), so topping up here costs almost nothing and is the difference
+        # between arriving able to win and arriving unable to.
+        _fin = read_lead_stable(runner)
+        if (self.heal_center and _fin and _fin["max_hp"]
+                and _fin["hp"] / _fin["max_hp"] < 0.8):
+            if runner.nav_state().in_battle:
+                from collection.playthrough.blocks.base import force_fight
+                force_fight(runner)
+                await_overworld(runner, budget=6000, phase=self.phase)
+            # Bounded by the return reserve (60k): the walk home is measured at 972
+            # frames, but a heal that eats the whole reserve would strand the block off
+            # its anchor map, and base's restore would then discard every level earned.
+            _heal_cap = min(runner.frame_idx + 20_000, deadline - 20_000)
+            if _heal_cap > runner.frame_idx and self._heal_at_center(runner, mk, _heal_cap):
+                summary["heals"] = summary.get("heals", 0) + 1
+                summary["healed_before_exit"] = True
         # LEAVE CLEANLY. base restores the entry savestate when the block ends in a
         # battle or out of the overworld, even if we are standing on the right map —
         # and that restore discards every level earned. Measured across 40 grind
