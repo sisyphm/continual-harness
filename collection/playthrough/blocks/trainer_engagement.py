@@ -94,6 +94,7 @@ SPINE_TRAINER_FLAGS: dict[int, str] = {
 }
 
 _ATTEMPTS = 4                      # bounded goto/talk rounds per target (trainer_hunt)
+_MAX_LOSSES = 2                 # losses tolerated before the block stops trying
 _RETRY_WAIT = 240                  # frames between rounds: let a wanderer move on
 
 
@@ -384,6 +385,7 @@ class TrainerEngagement:
 
     # ------------------------------------------------------------------- entry
 
+
     def run(self, runner, mk, ctx) -> dict:
         rng = random.Random(self.seed)
         summary = dict(engaged=[], skipped_with_reason=[], battles=0, ended="done",
@@ -399,9 +401,19 @@ class TrainerEngagement:
             if runner.frame_idx >= self._deadline:
                 self._skip(summary, flag, key, "block frame budget expired")
                 continue
-            if summary["ended"] in ("lead_hp_low", "no_lead", "battle_lost"):
+            if summary["ended"] in ("lead_hp_low", "no_lead"):
                 self._skip(summary, flag, key, f"aborted: {summary['ended']}")
                 continue
+            # A LOSS IS NOT AN ABORT (W33 proof, measured): a lost trainer battle
+            # whites out to the Center, which fully heals HP and PP — the very
+            # resource the next target needs. Aborting the rest threw away two of
+            # four scheduled trainers (and their XP) over one unwinnable fight.
+            # Bounded so an out-of-depth schedule can't spend the block losing.
+            if summary["ended"] == "battle_lost":
+                if len([e for e in summary["engaged"] if not e["won"]]) >= _MAX_LOSSES:
+                    self._skip(summary, flag, key, "aborted: loss budget spent")
+                    continue
+                summary["ended"] = "done"           # whiteout healed us: carry on
             self._engage_one(runner, mk, rng, key, flag, summary)
         summary["frames"] = runner.frame_idx - f0
         return summary

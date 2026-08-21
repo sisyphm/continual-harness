@@ -542,8 +542,12 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
         # dropped on purpose: a cross-map backtrack is the exact trip class that
         # cost 117k frames, and woods coverage is scheduled by its own rotation.
         "ROUTE_104_NORTH": [("0,19", 0x588), ("0,19", 0x75C), ("0,19", 0x651)],
+        # six, not four (measured margin): a L12 lead clears ~2 of these per sweep
+        # and one is reliably out of depth (Karen 280 beat the L12 proof lead), so
+        # a four-target sweep left the chain a level short of the L16 threshold.
         "RUSTBORO_CENTER_EXITED": [("0,31", 0x769), ("0,31", 0x642),
-                                   ("0,31", 0x618), ("0,31", 0x75D)],
+                                   ("0,31", 0x777), ("0,31", 0x611),
+                                   ("0,31", 0x75D), ("0,31", 0x618)],
     }
     for _stage, _gmap in _GRIND_LEGS:
         assert _stage in SAFE_ANCHORS, f"grind leg stage {_stage} not an eligible anchor"
