@@ -386,6 +386,8 @@ def goto_grass(runner, mk: MapKnowledge, budget: int = 8000) -> str:
 def pace_grass(runner, mk: MapKnowledge, rng, budget: int = 4000) -> str:
     """Walk randomly WITHIN grass cells until a battle starts; 'battle' | 'budget' | 'left'."""
     start = runner.frame_idx
+    _last_xy = None
+    _still = 0
     while runner.frame_idx - start < budget:
         if _in_battle(runner):
             return "battle"
@@ -394,8 +396,32 @@ def pace_grass(runner, mk: MapKnowledge, rng, budget: int = 4000) -> str:
             _hold(runner, [], 30, "nav_grass")
             continue
         g = grass_goal(t, mk.behaviors(t))
-        if g is None or not g[y + 7, x + 7]:
+        if g is None:
             return "left"
+        if not g[y + 7, x + 7]:
+            # Standing NEXT TO the grass, not in it — goto_grass lands here routinely,
+            # and bailing out just re-routes to the same spot. Measured on Route 116:
+            # the walker parked one tile off a patch and burned lap after lap without
+            # a single encounter. Step in; only give up when there is nothing to step
+            # into.
+            for dx, dy in DIRS:
+                if g[y + 7 + dy, x + 7 + dx] and _step(runner, DIRS[(dx, dy)]):
+                    break
+            else:
+                return "left"
+        # A pace that stops MOVING triggers nothing: encounters fire on a step, so a
+        # walker whose steps are refused burns its whole budget standing still.
+        # Measured on Route 116: 10 of 13 laps returned 'budget' after ~15,000 frames
+        # with the player parked on (13,15) the entire time, which is what makes a
+        # grind rep win zero battles. Give up quickly and let goto_grass re-route to
+        # another patch rather than paying the full budget for nothing.
+        if (x, y) == _last_xy:
+            _still += 1
+            if _still >= 12:
+                return "left"
+        else:
+            _still = 0
+        _last_xy = (x, y)
         opts = [(dx, dy) for (dx, dy) in DIRS if g[y + 7 + dy, x + 7 + dx]]
         if not opts:
             # No grass neighbour: the OLD code fell back to any direction, which
