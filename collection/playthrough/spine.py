@@ -87,6 +87,7 @@ def run_milestone(
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     battle_stall = 0                      # consecutive in-battle iterations with no frames
+    nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
     last_frame_seen = runner.frame_idx
 
     # Already complete on entry (common in continuous mode: handoff lands us past the gate).
@@ -127,8 +128,18 @@ def run_milestone(
                     # for 40 minutes and fails anyway.
                     failure_reason = "battle_wedge_unrecoverable"
                     break
+            else:
+                nav_stall = 0
         else:
             battle_stall = 0
+            # NAVIGATION stall: same zero-frame spin without a battle. exp_004 froze on
+            # goal (16, -1) — a map-edge crossing — printing "No progress possible"
+            # while the frame counter never moved, so no action or wall budget applied.
+            # Fail the milestone instead of spinning; retry/re-run is always cheaper.
+            nav_stall = nav_stall + 1 if runner.frame_idx == last_frame_seen else 0
+            if nav_stall >= 200:
+                failure_reason = "nav_wedge_no_frame_progress"
+                break
         last_frame_seen = runner.frame_idx
         if tic_fn is not None:
             tic_fn()
