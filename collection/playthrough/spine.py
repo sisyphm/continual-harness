@@ -86,7 +86,9 @@ def run_milestone(
     last_blocked_nav_key = None
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
-    _crossed_once = False                 # off-map pre-check fires at most once per attempt
+    _crossed_once = False                 # off-map recovery fires at most once per attempt
+    _last_pos = None                      # position-based stall signal (survives dry solves)
+    _stuck_pos = 0
     _adjacent_once = False                # blocked-goal pre-check, likewise
     _warped_once = False                  # wrong-map (door) pre-check, likewise
     t_start_frames = runner.frame_idx
@@ -230,6 +232,34 @@ def run_milestone(
         # EXIT_RIVAL_HOUSE -> LITTLEROOT_TO_ROUTE101, which stalled all ten runs of
         # wave 10. Acting ahead of the policy on a guess is far more dangerous than
         # reacting to a proven stall; the stall-triggered recovery below stays.)
+        # OFF-MAP GOAL, but ONLY once the player has provably stopped moving. The
+        # earlier version of this check ran speculatively on every iteration and broke
+        # nine milestones (sweep 46->37 of 51). The difference now: position is the
+        # stall signal — frame_idx keeps advancing during a dry solve, but a policy
+        # that cannot route leaves the player on the same tile. Narrow on both sides:
+        # the goal must lie outside this map AND this map must actually have a
+        # connection that way, so interiors (leave by a door) are never touched.
+        _pos = (runner.nav_state().map, runner.nav_state().x, runner.nav_state().y)
+        _stuck_pos = _stuck_pos + 1 if _pos == _last_pos else 0
+        _last_pos = _pos
+        if _stuck_pos >= 150 and not _crossed_once and expected_state is not None:
+            _gx = getattr(expected_state, "x", None)
+            _gy = getattr(expected_state, "y", None)
+            if _gx is not None and _gy is not None:
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None and not (0 <= _gx < _t.map_width
+                                           and 0 <= _gy < _t.map_height):
+                    _d = (2 if _gy < 0 else 1 if _gy >= _t.map_height else
+                          3 if _gx < 0 else 4)
+                    _mk = _nav.MapKnowledge()
+                    _key = f"{_t.map_group},{_t.map_num}"
+                    if _d in {c.get("direction") for c in _mk.connections.get(_key, [])}:
+                        _crossed_once = True
+                        _r = _nav.cross_connection(runner, _mk, _d, budget=20_000)
+                        print(f"spine: stuck {_stuck_pos} iters at {_pos}, goal "
+                              f"({_gx},{_gy}) off-map; crossed dir {_d} -> {_r}", flush=True)
+                        _stuck_pos = 0
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(

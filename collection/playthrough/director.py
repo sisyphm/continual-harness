@@ -393,6 +393,15 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
     summary = dict(starter=starter, seed=seed, persona=persona_cfg,
                    milestones_total=len(order),
                    milestones_passed=sum(1 for r in results if r["validation"] in ("passed", "skipped")),
+                   # A resumed run PLAYED only the tail: the milestones before the
+                   # resume point were inherited, not recorded here. Counting them as
+                   # passed would let a partial recording be banked as a complete run,
+                   # so say plainly how many were inherited and where the prefix lives.
+                   resumed_from=resume_state,
+                   resume_after=resume_after,
+                   milestones_inherited=sum(
+                       1 for r in results if r.get("failure_reason") == "resumed_past"),
+                   recording_is_end_to_end=not bool(resume_state),
                    total_frames=total_frames, wall_s=round(time.time() - t_run, 1), results=results,
                    blocks=block_log,
                    # §13 retry telemetry: per-milestone rows + fleet-audit aggregates
