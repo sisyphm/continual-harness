@@ -155,13 +155,19 @@ class GrindEvolve:
         return bool(lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"])
 
     def _fight(self, runner, rng, summary: dict, exp0: int) -> None:
-        from collection.collect_behaviors import _battle_one
-        _battle_one(runner, rng, "fight")
-        if runner.nav_state().in_battle:
-            # the heatz battle machine can leave a trainer battle unresolved (its party
-            # reader throws on some in-battle states); drive the menus from RAM instead
-            from collection.playthrough.blocks.base import force_fight
-            force_fight(runner)
+        # Drive the battle from RAM directly rather than through the heatz machine.
+        # Measured repeatedly tonight: that machine can sit inside a trainer battle
+        # forever (its party reader throws on some in-battle states, and RUN is refused
+        # outright), and because it never RETURNS, a fallback placed after it can never
+        # run — exp_010 and exp_013 both deadlocked at L15, one level from evolving,
+        # with force_fight sitting uselessly on the next line. force_fight steers
+        # UP+LEFT to FIGHT / first move then A, which plays a wild battle out fine and
+        # cannot get stuck on the RUN entry.
+        from collection.playthrough.blocks.base import force_fight
+        force_fight(runner)
+        if runner.nav_state().in_battle:            # last resort: the old machine
+            from collection.collect_behaviors import _battle_one
+            _battle_one(runner, rng, "fight")
         await_overworld(runner, phase=self.phase)
         # Only clear dialogs once the overworld cb2 is genuinely back: _clear_dialog
         # mixes a B press every third input, and B CANCELS an evolution in progress —
