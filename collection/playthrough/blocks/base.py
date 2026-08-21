@@ -164,6 +164,12 @@ def force_fight(runner, max_rounds: int = 500) -> bool:
     # while ANY A in the cycle eventually answers "make room for PECK?" with yes and
     # deletes slot 1 — Double Kick. B still advances battle text, and the battle menu
     # remembers FIGHT and the last move, so the fight continues without steering.
+    # Non-keeper cycle stays UP+LEFT+A. A "text-first" variant (A,A,A,UP,LEFT,A) was
+    # tried on the theory that most battle frames are dialogue, and measured WORSE by
+    # a wide margin on Route 104: 1 battle in 93,246 frames against 4 in 9,778. The
+    # extra A presses evidently disturb move selection rather than just advancing
+    # text. Keeper cycle is B-only: any A there answers the move-learn prompt and
+    # deletes Double Kick.
     _cycle = ("B",) if _keep else ("UP", "LEFT", "A")
     for _ in range(max_rounds):
         if not runner.nav_state().in_battle:
