@@ -57,6 +57,27 @@ def read_lead(runner) -> dict | None:
     return None
 
 
+def read_lead_stable(runner, tries: int = 6) -> dict | None:
+    """A lead reading confirmed by TWO CONSECUTIVE agreeing samples.
+
+    read_lead is checksum-gated but still returns occasional garbage — species 288
+    and 0 both appear in live ledgers. That is not cosmetic: the grind block latches
+    start_species at entry, and one bad baseline makes "species changed" true forever,
+    so the block exits at the target level reporting evolved=true having never
+    evolved (measured: exp_022_torchic, 45 wins, ended=target_level, evolved=true,
+    ledger says species 280 start to finish). Agreement across reads costs a few
+    frames and removes the whole class."""
+    prev = None
+    for _ in range(tries):
+        d = read_lead(runner)
+        if d is not None and prev is not None \
+                and d["species"] == prev["species"] and d["level"] == prev["level"]:
+            return d
+        prev = d
+        nav._hold(runner, [], 6, "grind")
+    return prev
+
+
 def await_overworld(runner, *, budget: int = 9000, phase: str = "grind") -> bool:
     """A-ONLY advance until gMain.callback2 is the overworld again. Covers the battle
     teardown fade AND the evolution scene (its own cb2) with its dialog chain. Never
@@ -156,7 +177,7 @@ class GrindEvolve:
         # measured: 21 won battles rolled back to L13, and the run then met
         # Roxanne under-levelled). Reserve budget to walk home ourselves.
         grind_until = deadline - _RETURN_RESERVE
-        lead = read_lead(runner)
+        lead = read_lead_stable(runner)
         if lead is None:
             summary["skipped"].append(dict(reason="no lead in party"))
             summary["ended"] = "no_lead"
@@ -208,7 +229,8 @@ class GrindEvolve:
             # reported evolved=True and exited. A cancelled evolution gets another
             # chance on the NEXT level-up, so keep grinding until the species actually
             # changes (or the budget ends).
-            if lead["level"] >= self.target_level and lead["species"] != start_species:
+            _chk = read_lead_stable(runner) or lead
+            if _chk["level"] >= self.target_level and _chk["species"] != start_species:
                 summary["ended"] = "target_level"
                 break
             if lead["level"] >= self.target_level + 4:
@@ -245,7 +267,7 @@ class GrindEvolve:
                 nav._unstick(runner, self.phase)
                 nav._hold(runner, [], 240, self.phase)
             # 'left'/'budget': loop — the deadline governs
-        after = read_lead(runner)
+        after = read_lead_stable(runner)
         if after is not None:
             summary["final_level"] = after["level"]
             summary["levels_gained"] = after["level"] - start_level
