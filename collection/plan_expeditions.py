@@ -559,8 +559,12 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
         assert "land" in manifest["wild"].get(_gmap, {}), \
             f"grind leg map {_gmap} has no land wild table"
     for st in STARTERS:
-        cand = sorted((r for r in workers if r["starter"] == st),
-                      key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
+        # torchic includes the HOLDOUT run: holdout is a train/eval split flag, not
+        # permission to skip the game. Without a grind the holdout torchic reaches the
+        # rock gym at L11 un-evolved and cannot clear 51/51 like every other run.
+        _pool = ([r for r in runs if r["starter"] == st] if st == "torchic"
+                 else [r for r in workers if r["starter"] == st])
+        cand = sorted(_pool, key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
         # torchic grinds on EVERY run, not just the coverage quota. Grinding was
         # designed as evolution COVERAGE (a couple of runs per starter), which is
         # right for mudkip and treecko — water and grass beat a rock gym at L11. A
