@@ -237,11 +237,22 @@ def run_milestone(
                     _d = (2 if _gy < 0 else 1 if _gy >= _t.map_height else
                           3 if _gx < 0 else 4)
                     _crossed_once = True
-                    _r = _nav.cross_connection(runner, _nav.MapKnowledge(), _d,
-                                               budget=20_000)
+                    _mk = _nav.MapKnowledge()
+                    _key = f"{_t.map_group},{_t.map_num}"
+                    _conns = {c.get("direction") for c in _mk.connections.get(_key, [])}
+                    if _d in _conns:
+                        _r = _nav.cross_connection(runner, _mk, _d, budget=20_000)
+                        _how = f"crossed dir {_d}"
+                    else:
+                        # No connection that way: this is an interior, and a building is
+                        # left through a scripted door the policy already knows. Do
+                        # NOTHING rather than invent a route — an earlier version walked
+                        # at the wall of Birch's lab (13x13, goal y=17) and then tried
+                        # its warps, both 'stuck', purely wasting the budget.
+                        _r = "skipped (interior)"
+                        _how = f"no conn dir {_d}"
                     print(f"spine pre-check: goal ({_gx},{_gy}) off-map "
-                          f"{_t.map_width}x{_t.map_height}; crossed dir {_d} -> {_r}",
-                          flush=True)
+                          f"{_t.map_width}x{_t.map_height}; {_how} -> {_r}", flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
