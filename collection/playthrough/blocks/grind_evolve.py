@@ -200,9 +200,34 @@ class GrindEvolve:
         # Use the fast machine, and keep force_fight for exactly what it is good at:
         # a battle the machine could not finish.
         from collection.collect_behaviors import _battle_one
-        _battle_one(runner, rng, "fight")
+        from collection.playthrough.blocks.base import force_fight
+        # BOUND the fast machine so the fallback can actually run. _battle_one resolves
+        # a wild battle in ~1,476 frames but can sit in a trainer battle forever, and
+        # because it never RETURNS, a fallback on the next line is unreachable — that
+        # is how runs kept burning 8 minutes until the watchdog killed them. Cap it at
+        # ~4x a normal battle, then hand over to force_fight, which is slower but
+        # always terminates.
+        _deadline = runner.frame_idx + 6000
+        _orig = runner.step_frame
+
+        class _BattleTooLong(Exception):
+            pass
+
+        def _guarded(*a, **kw):
+            if runner.frame_idx >= _deadline:
+                raise _BattleTooLong()
+            return _orig(*a, **kw)
+
+        runner.step_frame = _guarded
+        try:
+            _battle_one(runner, rng, "fight")
+        except _BattleTooLong:
+            summary["battle_timeouts"] = summary.get("battle_timeouts", 0) + 1
+        except Exception:
+            raise
+        finally:
+            runner.step_frame = _orig
         if runner.nav_state().in_battle:
-            from collection.playthrough.blocks.base import force_fight
             force_fight(runner)
         await_overworld(runner, phase=self.phase)
         # Only clear dialogs once the overworld cb2 is genuinely back: _clear_dialog

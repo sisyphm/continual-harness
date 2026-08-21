@@ -89,6 +89,7 @@ def run_milestone(
     _crossed_once = False                 # off-map recovery fires at most once per attempt
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
+    _recent: list = []                    # sliding window of positions (catches oscillation)
     _adjacent_once = False                # blocked-goal pre-check, likewise
     _warped_once = False                  # wrong-map (door) pre-check, likewise
     t_start_frames = runner.frame_idx
@@ -240,9 +241,18 @@ def run_milestone(
         # the goal must lie outside this map AND this map must actually have a
         # connection that way, so interiors (leave by a door) are never touched.
         _pos = (runner.nav_state().map, runner.nav_state().x, runner.nav_state().y)
-        _stuck_pos = _stuck_pos + 1 if _pos == _last_pos else 0
+        # OSCILLATION COUNTS AS STUCK. Comparing against the single previous position
+        # misses the common case: the policy shuffles the player between two or three
+        # tiles, so an "unchanged" counter resets forever and the recovery never runs
+        # (exp_037 sat on goal (16,-1) for 300s holding Double Kick while this check
+        # did nothing). Track the recent window instead — a walk that only ever visits
+        # a handful of tiles is not making progress, however much it moves.
+        _recent.append(_pos)
+        if len(_recent) > 200:
+            _recent.pop(0)
+        _stuck_pos = len(_recent) if (len(_recent) >= 200 and len(set(_recent)) <= 4) else 0
         _last_pos = _pos
-        if _stuck_pos >= 150 and not _crossed_once and expected_state is not None:
+        if _stuck_pos and not _crossed_once and expected_state is not None:
             _gx = getattr(expected_state, "x", None)
             _gy = getattr(expected_state, "y", None)
             if _gx is not None and _gy is not None:
