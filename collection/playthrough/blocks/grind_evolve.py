@@ -89,6 +89,9 @@ def read_lead_stable(runner, tries: int = 10) -> dict | None:
 
 
 _EVOLVED_FORMS = {278, 279, 281, 282, 284, 285}
+# Moves worth refusing a later prompt to keep. Double Kick (24) is the reason a
+# torchic run can beat a ROCK gym at all.
+_KEEPER_MOVES = {24}
 
 
 def await_overworld(runner, *, budget: int = 9000, phase: str = "grind") -> bool:
@@ -106,8 +109,14 @@ def await_overworld(runner, *, budget: int = 9000, phase: str = "grind") -> bool
     just during the grind. B answers NO to that prompt."""
     st = GBAState.from_env(runner.env)
     lead = read_lead(runner)
-    evolved = bool(lead and lead["species"] in _EVOLVED_FORMS)
-    keys = ["A", "A", "B"] if evolved else ["A"]
+    # The gate is whether the KEEPER move is already known, not whether we evolved.
+    # Double Kick is offered immediately AFTER the evolution — the ledger shows
+    # sp=281 [10,45,116,52] then [24,45,116,52] back to back — so declining on
+    # "species is evolved" would refuse the very move we are protecting. Accept
+    # prompts until the keeper is in hand; decline afterwards, when the only thing
+    # on offer is Peck at 17 and A would forget the keeper's slot.
+    has_keeper = bool(lead and _KEEPER_MOVES & set(lead.get("moves") or ()))
+    keys = ["A", "A", "B"] if has_keeper else ["A"]
     f0 = runner.frame_idx
     i = 0
     while runner.frame_idx - f0 < budget:
