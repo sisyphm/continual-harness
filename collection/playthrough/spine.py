@@ -86,6 +86,7 @@ def run_milestone(
     last_blocked_nav_key = None
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
+    _crossed_once = False                 # off-map pre-check fires at most once per attempt
     battle_stall = 0                      # consecutive in-battle iterations with no frames
     nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
     last_frame_seen = runner.frame_idx
@@ -219,6 +220,28 @@ def run_milestone(
         last_frame_seen = runner.frame_idx
         if tic_fn is not None:
             tic_fn()
+        # OFF-MAP GOAL PRE-CHECK. Do not wait for a stall: the policy retries for
+        # minutes while the frame counter keeps moving, so a stall detector never
+        # trips and the fallback below was dead code (measured: exp_008_treecko
+        # failed 8 times on goal (4,-1) with zero fallback fires). If the target lies
+        # outside this map, the ONLY way there is the connection in that direction,
+        # so cross it now with our navigator. Once per milestone attempt.
+        if not _crossed_once and expected_state is not None:
+            _gx = getattr(expected_state, "x", None)
+            _gy = getattr(expected_state, "y", None)
+            if _gx is not None and _gy is not None:
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None and not (0 <= _gx < _t.map_width
+                                           and 0 <= _gy < _t.map_height):
+                    _d = (2 if _gy < 0 else 1 if _gy >= _t.map_height else
+                          3 if _gx < 0 else 4)
+                    _crossed_once = True
+                    _r = _nav.cross_connection(runner, _nav.MapKnowledge(), _d,
+                                               budget=20_000)
+                    print(f"spine pre-check: goal ({_gx},{_gy}) off-map "
+                          f"{_t.map_width}x{_t.map_height}; crossed dir {_d} -> {_r}",
+                          flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
