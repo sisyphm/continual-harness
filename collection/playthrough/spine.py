@@ -143,8 +143,36 @@ def run_milestone(
             # Fail the milestone instead of spinning; retry/re-run is always cheaper.
             nav_stall = nav_stall + 1 if runner.frame_idx == last_frame_seen else 0
             if nav_stall >= 200:
-                failure_reason = "nav_wedge_no_frame_progress"
-                break
+                # WRONG-MAP GOAL. The policy paths the NEXT map's coordinates
+                # against the CURRENT map's grid, so the goal lands OUTSIDE the map
+                # and no route can reach it. Measured: exp_008_treecko stood in
+                # OLDALE TOWN pathing to (4,-1) — Oldale's north exit is x=8..11 —
+                # because the target belonged to ROUTE 103. It died there under two
+                # different persona seeds while 30 other runs walked through.
+                # An out-of-bounds goal IS the direction to travel, so cross that
+                # connection with our navigator (which handles edges properly).
+                _moved = False
+                try:
+                    from collection import navigator as _nav
+                    _t, _, _ = _nav._state(runner)
+                    _gx = getattr(expected_state, "x", None)
+                    _gy = getattr(expected_state, "y", None)
+                    if _t is not None and _gx is not None and _gy is not None:
+                        _dir = (2 if _gy < 0 else 1 if _gy >= _t.map_height else
+                                3 if _gx < 0 else 4 if _gx >= _t.map_width else None)
+                        if _dir is not None:
+                            _r = _nav.cross_connection(runner, _nav.MapKnowledge(), _dir,
+                                                       budget=20_000)
+                            _moved = _r == "crossed"
+                            print(f"nav wedge: goal ({_gx},{_gy}) is off-map "
+                                  f"{_t.map_width}x{_t.map_height}; crossed dir {_dir}: {_r}",
+                                  flush=True)
+                except Exception as _e:
+                    print(f"nav wedge cross failed: {_e!r}", flush=True)
+                nav_stall = 0
+                if not _moved:
+                    failure_reason = "nav_wedge_no_frame_progress"
+                    break
         last_frame_seen = runner.frame_idx
         if tic_fn is not None:
             tic_fn()
