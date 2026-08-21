@@ -57,7 +57,7 @@ def read_lead(runner) -> dict | None:
     return None
 
 
-def read_lead_stable(runner, tries: int = 6) -> dict | None:
+def read_lead_stable(runner, tries: int = 10) -> dict | None:
     """A lead reading confirmed by TWO CONSECUTIVE agreeing samples.
 
     read_lead is checksum-gated but still returns occasional garbage — species 288
@@ -67,8 +67,18 @@ def read_lead_stable(runner, tries: int = 6) -> dict | None:
     evolved (measured: exp_022_torchic, 45 wins, ended=target_level, evolved=true,
     ledger says species 280 start to finish). Agreement across reads costs a few
     frames and removes the whole class."""
+    # NEVER sample during a battle. Measured over 1.84M ledger ticks: 2.13% carry an
+    # implausible lead species, and EVERY implausible stretch runs 50+ consecutive
+    # ticks — so two agreeing reads a few frames apart agree on the same garbage.
+    # The values are foe species (288 = Vigoroth), i.e. the read lands on the enemy
+    # party while a battle is up. Waiting for the overworld removes the whole class;
+    # agreement then only has to catch the rare single-tick blip (702 of those, all
+    # length 1).
     prev = None
     for _ in range(tries):
+        if runner.nav_state().in_battle:
+            nav._hold(runner, [], 30, "grind")
+            continue
         d = read_lead(runner)
         if d is not None and prev is not None \
                 and d["species"] == prev["species"] and d["level"] == prev["level"]:
