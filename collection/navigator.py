@@ -202,6 +202,27 @@ def _clear_dialog(runner, phase: str = "nav", max_cycles: int = 60) -> None:
         _hold(runner, [], 14, phase)
 
 
+def _release_lock(runner, phase: str = "nav") -> bool:
+    """Free a walk whose steps are ALL being refused, without talking to anyone.
+
+    B closes a textbox; A closes it and, if we are facing an NPC, immediately re-opens
+    it by talking to them again. That distinction is the whole bug: after a gym trainer
+    battle the walk faces the trainer, _unstick mashes A, the dialog re-opens, movement
+    stays frozen, and every direction gets refused -- measured at (1,9) in RUSTBORO CITY
+    GYM, where up/right/down/left ALL failed eleven times running while a single B press
+    followed by a step succeeded immediately.
+
+    Returns True as soon as a real step lands (the walk re-plans from there anyway).
+    """
+    for _ in range(8):
+        _hold(runner, ["B"], 3, phase)
+        _hold(runner, [], 14, phase)
+        for d in ("down", "left", "right", "up"):
+            if _step(runner, d):
+                return True
+    return False
+
+
 def _unstick(runner, phase: str = "nav") -> None:
     """Clear input locks. Two classes, both found by screenshot: an OPEN dialogue (advance with A
     until gone) and boxless script locks (the May-interaction base: scripted NPC movement /
@@ -309,12 +330,23 @@ def goto(runner, mk: MapKnowledge, goal_fn, *, budget: int = 8000, phase: str = 
             misses += 1
             _cell = (bx + step[0], by + step[1])
             refusals[_cell] = refusals.get(_cell, 0) + 1
-            if misses % 3 == 1:                               # script lock? clear before blaming
-                _unstick(runner, phase)                       # the cell (re-fires: an unstick
-                continue                                      # can itself reopen a dialog)
+            # ROUTE AROUND BEFORE UNSTICKING. _unstick mashes A, and an A pressed while
+            # we face the NPC who just refused us RE-OPENS their dialog -- which freezes
+            # movement, so the next direction is refused too and the walk convicts tiles
+            # that were never blocked. Measured in RUSTBORO CITY GYM after the trainer
+            # fight: he stands in the one-tile corridor at (5,14), UP was refused, and
+            # then DOWN was refused three times purely because the unstick had re-talked
+            # to him -- goto returned "stuck" while a plain step DOWN taken before any
+            # unstick succeeded immediately, with a full alternate route up column x=1
+            # sitting unused. Blocking the cell first costs nothing, and a genuine
+            # script lock still gets its unstick on the following miss.
             blocked[_cell] = runner.frame_idx                 # NPC / ledge: route around
             if miss_fn is not None:
                 miss_fn(bx + step[0] - 7, by + step[1] - 7)
+            if misses % 3 == 2:                               # still refused after the
+                if not _release_lock(runner, phase):          # re-route: a lock, then --
+                    _unstick(runner, phase)                   # B first, A-mash only if B
+                continue                                      # could not free us
             if misses >= 8:
                 return "stuck"
             _hold(runner, [], 10, phase)
