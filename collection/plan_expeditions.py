@@ -563,17 +563,19 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                       key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
         for r in cand[:fl["grind_runs_per_starter"]]:
             for _stage, _gmap, _heal in _GRIND_LEGS:
-                if r["starter"] == "torchic":
-                    _tt = _TORCHIC_SWEEPS[_stage]
-                    add(r, _stage, "trainer_engagement",
-                        {"targets": [{"map": m, "trainer_flag": f} for m, f in _tt],
-                         "frames": TRAINER_BLOCK_FRAMES + 40_000,
-                         "seed": rng.getrandbits(20)},
-                        "encounter", EST_TRAINER_BASE + len(_tt) * EST_TRAINER_FRAMES)
-                add(r, _stage, "grind_evolve",
-                    {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
-                     "grass_map": _gmap, "heal_center": _heal,
-                     "seed": rng.getrandbits(20)}, "grind_idle", GRIND_FRAMES)
+                # torchic needs L16 (Combusken's Double Kick) to pass a ROCK gym, i.e.
+                # +4 levels from the L12 it arrives with. One grind block reliably
+                # returns +2 in ~49k of its 520k budget and then ends honestly at the
+                # hp floor, so the levels come from REPEATING the proven block at the
+                # Center-adjacent anchor (each one heals there first) instead of from
+                # a trainer sweep, which blew its budget and got rolled back twice.
+                _reps = 3 if (r["starter"] == "torchic"
+                              and _stage == "RUSTBORO_CENTER_EXITED") else 1
+                for _rep in range(_reps):
+                    add(r, _stage, "grind_evolve",
+                        {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
+                         "grass_map": _gmap, "heal_center": _heal,
+                         "seed": rng.getrandbits(20)}, "grind_idle", GRIND_FRAMES)
 
     # -- idle / menus sprinkled (deterministic fix-up guarantees the floor)
     want_idle = max(1, n_runs // fl["idle_run_share"])

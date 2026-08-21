@@ -154,6 +154,14 @@ class GrindEvolve:
             return summary
         start_level, start_species = lead["level"], lead["species"]
         summary["final_level"] = start_level
+        # HEAL BEFORE LEAVING THE ANCHOR (measured): a heal trip that starts deep in
+        # the grass fails (wild draws, trainer sight lines, one-way ledges), but the
+        # leg-2 anchor stands beside the Rustboro Center — 972 frames, live-verified.
+        # A block that arrives under the floor otherwise grinds one battle and quits.
+        if self.heal_center and lead["max_hp"]:
+            if lead["hp"] / lead["max_hp"] < self.hp_floor and self._heal_at_center(
+                    runner, mk, min(deadline, runner.frame_idx + 40_000)):
+                summary["heals"] = summary.get("heals", 0) + 1
         if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
             summary["skipped"].append(dict(reason=f"grass_map {self.grass_map} unreachable"))
             summary["ended"] = "grass_map_unreachable"
