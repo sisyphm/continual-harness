@@ -97,32 +97,8 @@ class GrindEvolve:
         self.max_heals = int(max_heals)
 
     def _goto_map_safe(self, runner, mk, key: str, deadline: int) -> bool:
-        """Bounded cross-map hop with battle-flee retry; True iff we stand on `key`.
-        Six attempts, not two (W33, measured): the heal trip starts INSIDE grass, so
-        walking out draws wild encounters — a 2-try hop died to the second battle
-        every time (leg 1 ended lead_hp_low with zero heal_trip actions) while the
-        anchor-return machinery's 6-flee tolerance crosses fine."""
-        from collection.playthrough.blocks.base import flee_battle
-        for _ in range(12):
-            t, _, _ = nav._state(runner)
-            if t is None and runner.nav_state().in_battle:
-                # terrain reads None for the whole battle (gBackupMapLayout torn
-                # down) — goto_map would burn its holds inside the battle screen
-                # (measured: 6 x 360 frames of nothing). Leave the battle first.
-                flee_battle(runner)
-                continue
-            if t is not None and f"{t.map_group},{t.map_num}" == key:
-                return True
-            if runner.frame_idx >= deadline:
-                return False
-            r = nav.goto_map(runner, mk, key,
-                             hop_budget=max(0, min(20_000, deadline - runner.frame_idx)))
-            if r == "battle":
-                flee_battle(runner)
-                continue
-            break
-        t, _, _ = nav._state(runner)
-        return t is not None and f"{t.map_group},{t.map_num}" == key
+        from collection.playthrough.blocks.base import goto_map_safe
+        return goto_map_safe(runner, mk, key, deadline)
 
     def _heal_at_center(self, runner, mk, deadline: int) -> bool:
         """Nurse-heal trip: enter the Center, walk to the nurse at (7, 2) — the

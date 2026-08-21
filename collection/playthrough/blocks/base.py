@@ -134,6 +134,50 @@ def flee_battle(runner, max_actions: int = 40) -> bool:
     return not runner.nav_state().in_battle
 
 
+def leave_battle(runner) -> None:
+    """Get out of whatever battle we are in, by ANY legal means.
+
+    RUN is refused outright in a trainer battle ("no running from a trainer
+    battle!"), so mashing it — 40 actions, then again on each of twelve hop
+    attempts — is how every Route 116 heal trip burned its budget while the lead
+    stayed at 4 HP. Fight instead: winning is XP, and losing whites out to the
+    Center, which fully restores HP and PP. Both beat arguing with the RUN menu."""
+    if flee_battle(runner, max_actions=12):
+        return
+    if runner.nav_state().in_battle:
+        import random
+        from collection.collect_behaviors import _battle_one
+        from collection.playthrough.blocks.grind_evolve import await_overworld
+        _battle_one(runner, random.Random(0), "fight")
+        await_overworld(runner)
+
+
+def goto_map_safe(runner, mk, key: str, deadline: int) -> bool:
+    """Bounded cross-map hop with battle-flee retry; True iff we stand on `key`.
+    Twelve attempts, not two (W33, measured): a hop that starts INSIDE grass draws
+    wild encounters, and a 2-try hop died to the second battle every time."""
+    from collection import navigator as nav
+    for _ in range(12):
+        t, _, _ = nav._state(runner)
+        if t is None and runner.nav_state().in_battle:
+            # terrain reads None for the whole battle (gBackupMapLayout torn down) —
+            # goto_map would burn its holds inside the battle screen. Leave first.
+            leave_battle(runner)
+            continue
+        if t is not None and f"{t.map_group},{t.map_num}" == key:
+            return True
+        if runner.frame_idx >= deadline:
+            return False
+        r = nav.goto_map(runner, mk, key,
+                         hop_budget=max(0, min(20_000, deadline - runner.frame_idx)))
+        if r == "battle":
+            leave_battle(runner)
+            continue
+        break
+    t, _, _ = nav._state(runner)
+    return t is not None and f"{t.map_group},{t.map_num}" == key
+
+
 def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict:
     """W33 §2 wrapper for NAVIGATOR-driven expedition blocks (bfs_sweep, encounter_farm):
     same safety contract as run_block — precondition (free overworld, no battle/dialog,

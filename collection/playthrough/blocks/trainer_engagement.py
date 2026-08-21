@@ -95,6 +95,7 @@ SPINE_TRAINER_FLAGS: dict[int, str] = {
 
 _ATTEMPTS = 4                      # bounded goto/talk rounds per target (trainer_hunt)
 _MAX_LOSSES = 2                 # losses tolerated before the block stops trying
+_RETURN_RESERVE = 40_000        # frames held back so the walk home always fits
 _RETRY_WAIT = 240                  # frames between rounds: let a wanderer move on
 
 
@@ -390,8 +391,13 @@ class TrainerEngagement:
         rng = random.Random(self.seed)
         summary = dict(engaged=[], skipped_with_reason=[], battles=0, ended="done",
                        frames=0)
+        ctx["summary"] = summary     # live ref: survives a budget-guard cut
         f0 = runner.frame_idx
-        self._deadline = f0 + self.frames
+        # Reserve the walk home. base restores the block-entry savestate when its
+        # anchor return fails off-map, which REWINDS the world: a sweep that won
+        # three trainers had all three flags flipped back to unset (measured, and
+        # its own XP with them). Engaging until the last frame guarantees that.
+        self._deadline = f0 + max(self.frames - _RETURN_RESERVE, self.frames // 2)
         self._watch = set(TRACKED_TRAINER_FLAGS) | {
             int(t["trainer_flag"]) for t in self.targets}
         self._flag_state = self._watch_set(runner)
@@ -415,5 +421,12 @@ class TrainerEngagement:
                     continue
                 summary["ended"] = "done"           # whiteout healed us: carry on
             self._engage_one(runner, mk, rng, key, flag, summary)
+        amap = (ctx.get("anchor") or (None,))[0]
+        if amap:
+            from collection.playthrough.blocks.base import goto_map_safe
+            t_end, _, _ = nav._state(runner)
+            cur = None if t_end is None else f"{t_end.map_group},{t_end.map_num}"
+            if cur != amap and not goto_map_safe(runner, mk, amap, f0 + self.frames):
+                summary["anchor_return_failed"] = True
         summary["frames"] = runner.frame_idx - f0
         return summary
