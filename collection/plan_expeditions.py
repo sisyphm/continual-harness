@@ -536,7 +536,12 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
     # near the leg-1 anchor, then Route 116 singles post-heal before leg 2.
     # Flags = 0x500 + script trainer id (empirically verified, see the block).
     _TORCHIC_SWEEPS = {
-        "ROUTE_104_NORTH": [("0,19", 0x588), ("0,19", 0x75C), ("24,11", 0x76D)],
+        # all three on the anchor's own map and BFS-verified reachable from the
+        # leg-1 position even with the twins blocking (Winston 136, Haley 604,
+        # id 337 standing beside the anchor). A Petalburg Woods target was
+        # dropped on purpose: a cross-map backtrack is the exact trip class that
+        # cost 117k frames, and woods coverage is scheduled by its own rotation.
+        "ROUTE_104_NORTH": [("0,19", 0x588), ("0,19", 0x75C), ("0,19", 0x651)],
         "RUSTBORO_CENTER_EXITED": [("0,31", 0x769), ("0,31", 0x642),
                                    ("0,31", 0x618), ("0,31", 0x75D)],
     }

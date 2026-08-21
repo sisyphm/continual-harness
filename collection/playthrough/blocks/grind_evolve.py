@@ -41,6 +41,9 @@ from collection.extractors.ledger_panel import (
 from collection.extractors.ram import GBAState
 
 
+_RETURN_RESERVE = 60_000     # frames held back for the walk home (116->Rustboro = 972)
+
+
 def read_lead(runner) -> dict | None:
     """Slot-0 party mon (decrypted, checksum-gated), or None (empty party/mid-write)."""
     st = GBAState.from_env(runner.env)
@@ -162,6 +165,11 @@ class GrindEvolve:
         ctx["summary"] = summary   # live reference: survives a budget-guard cut (W33)
         f0 = runner.frame_idx
         deadline = f0 + self.frames
+        # base restores the ENTRY savestate when its anchor return fails off-map,
+        # which silently DISCARDS every level this block just earned (wave-3
+        # measured: 21 won battles rolled back to L13, and the run then met
+        # Roxanne under-levelled). Reserve budget to walk home ourselves.
+        grind_until = deadline - _RETURN_RESERVE
         lead = read_lead(runner)
         if lead is None:
             summary["skipped"].append(dict(reason="no lead in party"))
@@ -182,7 +190,7 @@ class GrindEvolve:
             summary["ended"] = "no_grass"
             summary["frames"] = runner.frame_idx - f0
             return summary
-        while runner.frame_idx < deadline:
+        while runner.frame_idx < grind_until:
             lead = read_lead(runner)
             if lead is None:
                 summary["ended"] = "lead_unreadable"
@@ -237,5 +245,12 @@ class GrindEvolve:
             summary["final_level"] = after["level"]
             summary["levels_gained"] = after["level"] - start_level
             summary["evolved"] = after["species"] != start_species
+        # walk back to the anchor map ourselves so the XP survives (see above)
+        amap = (ctx.get("anchor") or (None,))[0]
+        if amap:
+            t_end, _, _ = nav._state(runner)
+            cur = None if t_end is None else f"{t_end.map_group},{t_end.map_num}"
+            if cur != amap and not self._goto_map_safe(runner, mk, amap, deadline):
+                summary["anchor_return_failed"] = True
         summary["frames"] = runner.frame_idx - f0
         return summary

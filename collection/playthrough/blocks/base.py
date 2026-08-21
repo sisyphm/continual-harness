@@ -223,6 +223,11 @@ def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict
                 not on_anchor_map or st_end.in_battle or st_end.control_mode != "free_overworld"):
             runner.load_state_bytes(entry_snap, record=True)
             summary["restored_to_entry"] = True
+            # the restore rewinds the WORLD: a block that earned levels/flags loses
+            # them here. Never silent — audits must be able to find these.
+            if summary.get("levels_gained") or summary.get("battles_won") \
+                    or summary.get("engaged"):
+                summary["restore_discarded_progress"] = True
     # `frames` (in **summary) = the block's own work; frames_total adds settle + return.
     return dict(block=block.name, ran=True, anchor=list(anchor), returned=returned,
                 over_budget=over_budget, frame_budget=budget,
