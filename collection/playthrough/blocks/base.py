@@ -147,10 +147,28 @@ def force_fight(runner, max_rounds: int = 500) -> bool:
     menu) and then presses A, which also advances battle text. That is enough to play
     a battle to its end, win or faint — and a faint whites us out to a Center with a
     full heal, which the grind block already treats as its heal."""
+    # DO NOT STEER when the lead holds a keeper move. Measured directly: ten slow A
+    # presses through a level-up leave [24,45,116,52] intact, but the UP+LEFT steer
+    # walks the "which move should be forgotten?" cursor onto slot 1 — Double Kick —
+    # and the following A confirms the delete. A alone answers the prompts without
+    # ever moving that cursor, and the battle menu already remembers FIGHT and the
+    # last move used, so A-only still fights.
+    try:
+        from collection.playthrough.blocks.grind_evolve import read_lead, _KEEPER_MOVES
+        _l = read_lead(runner)
+        _keep = bool(_l and _KEEPER_MOVES & set(_l.get("moves") or ()))
+    except Exception:
+        _keep = False
+    # B-ONLY once a keeper move is held. Measured directly on a Combusken holding
+    # [24,45,116,52]: 25 B presses through the L17 level-up leave the moveset intact,
+    # while ANY A in the cycle eventually answers "make room for PECK?" with yes and
+    # deletes slot 1 — Double Kick. B still advances battle text, and the battle menu
+    # remembers FIGHT and the last move, so the fight continues without steering.
+    _cycle = ("B",) if _keep else ("UP", "LEFT", "A")
     for _ in range(max_rounds):
         if not runner.nav_state().in_battle:
             return True
-        for b in ("UP", "LEFT", "A"):
+        for b in _cycle:
             _nav()._hold(runner, [b], 3, "battle_fix")
             _nav()._hold(runner, [], 10, "battle_fix")
     return not runner.nav_state().in_battle

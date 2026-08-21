@@ -116,7 +116,10 @@ def await_overworld(runner, *, budget: int = 9000, phase: str = "grind") -> bool
     # prompts until the keeper is in hand; decline afterwards, when the only thing
     # on offer is Peck at 17 and A would forget the keeper's slot.
     has_keeper = bool(lead and _KEEPER_MOVES & set(lead.get("moves") or ()))
-    keys = ["A", "A", "B"] if has_keeper else ["A"]
+    # B-ONLY, not a mix: any A in the rotation answers "make room for PECK?" with yes
+    # and the next one deletes slot 1. Safe here because a keeper move only exists
+    # after evolving, so no evolution can be pending for B to cancel.
+    keys = ["B"] if has_keeper else ["A"]
     f0 = runner.frame_idx
     i = 0
     while runner.frame_idx - f0 < budget:
