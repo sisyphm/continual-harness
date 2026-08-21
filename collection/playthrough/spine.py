@@ -169,9 +169,52 @@ def run_milestone(
                                   flush=True)
                 except Exception as _e:
                     print(f"nav wedge cross failed: {_e!r}", flush=True)
+                # IN-MAP blocked goal — 54 of 91 failed attempts today, the single
+                # biggest failure mode. The policy's goal is often an NPC's own tile
+                # (TRAINER_JOSH_BATTLE targets (5,3), where Josh stands), which is by
+                # definition unwalkable, so it reports "no progress" forever. Our
+                # navigator reads collision and elevation from RAM and remembers
+                # refused tiles, so hand it the goal AND its neighbours and let it
+                # walk us adjacent — adjacency is all a talk/sight trigger needs.
+                if not _moved:
+                    try:
+                        import numpy as _np
+                        from collection import navigator as _nav
+                        _t, _, _ = _nav._state(runner)
+                        _gx = getattr(expected_state, "x", None)
+                        _gy = getattr(expected_state, "y", None)
+                        # ONLY when we are genuinely on the goal's map. Bounds alone
+                        # cannot tell: TRAINER_JOSH_BATTLE and ROXANNE_BATTLE both
+                        # target (5,3) inside RUSTBORO CITY GYM, and (5,3) also lies
+                        # inside Route 116's bounds — walking there would be nonsense.
+                        # Compare map NAMES, which both sides carry.
+                        _same_map = (getattr(expected_state, "map", None)
+                                     and runner.nav_state().map == expected_state.map)
+                        if _same_map and _t is not None and _gx is not None and _gy is not None \
+                                and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
+                            def _goal(t, beh, gx=_gx, gy=_gy):
+                                m = _np.zeros(t.grid.shape, bool)
+                                for dx, dy in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)):
+                                    yy, xx = gy + dy + 7, gx + dx + 7
+                                    if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
+                                        m[yy, xx] = True
+                                return m & (((t.grid >> 10) & 3) == 0)
+                            _r = _nav.goto(runner, _nav.MapKnowledge(), _goal,
+                                           budget=15_000, phase="spine")
+                            _moved = _r in ("arrived", "battle")
+                            print(f"nav wedge: our navigator to ({_gx},{_gy})+adj -> {_r}",
+                                  flush=True)
+                    except Exception as _e:
+                        print(f"nav wedge in-map fallback failed: {_e!r}", flush=True)
                 nav_stall = 0
                 if not _moved:
-                    failure_reason = "nav_wedge_no_frame_progress"
+                    # Wrong-map goal we cannot cross to (e.g. a gym interior reached
+                    # through a door): fail fast so retry/re-seed takes over instead
+                    # of spinning. Recorded distinctly so the audit can count them.
+                    _em = getattr(expected_state, "map", None)
+                    failure_reason = ("nav_wedge_wrong_map"
+                                      if _em and runner.nav_state().map != _em
+                                      else "nav_wedge_no_frame_progress")
                     break
         last_frame_seen = runner.frame_idx
         if tic_fn is not None:
