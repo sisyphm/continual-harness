@@ -90,6 +90,7 @@ def run_milestone(
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
+    _warped_once = False                  # door search fires at most once per attempt
     _adjacent_once = False                # blocked-goal pre-check, likewise
     _warped_once = False                  # wrong-map (door) pre-check, likewise
     t_start_frames = runner.frame_idx
@@ -270,6 +271,36 @@ def run_milestone(
                         print(f"spine: stuck {_stuck_pos} iters at {_pos}, goal "
                               f"({_gx},{_gy}) off-map; crossed dir {_d} -> {_r}", flush=True)
                         _stuck_pos = 0
+        # WRONG-MAP GOAL, gated on the SAME proven stall. The goal is in bounds here
+        # (so it is not the connection case) but belongs to another map: (5,3) exists
+        # in RUSTBORO CITY as well as in RUSTBORO CITY GYM, so the policy walks
+        # confidently to the wrong place. An earlier version of this ran speculatively
+        # on every iteration and broke nine milestones; it now fires only after the
+        # walk has visited four tiles or fewer for 200 iterations, and only when the
+        # map NAME disagrees. Try this map's doors until the name matches, stepping
+        # back out of any wrong building.
+        if _stuck_pos and not _warped_once and expected_state is not None:
+            _em = getattr(expected_state, "map", None)
+            if _em and runner.nav_state().map != _em:
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None:
+                    _warped_once = True
+                    _mk = _nav.MapKnowledge()
+                    _key = f"{_t.map_group},{_t.map_num}"
+                    for _wp in (_mk.warps.get(_key) or [])[:8]:
+                        _r = _nav.goto_warp(runner, _mk, _wp["x"], _wp["y"], budget=6_000)
+                        if runner.nav_state().map == _em:
+                            print(f"spine: stuck, entered {_em} via warp "
+                                  f"({_wp['x']},{_wp['y']})", flush=True)
+                            break
+                        if _r == "crossed":
+                            _t2, _, _ = _nav._state(runner)
+                            _k2 = None if _t2 is None else f"{_t2.map_group},{_t2.map_num}"
+                            _back = (_mk.warps.get(_k2) or [])[:1]
+                            if _back:
+                                _nav.goto_warp(runner, _mk, _back[0]["x"], _back[0]["y"],
+                                               budget=6_000)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
