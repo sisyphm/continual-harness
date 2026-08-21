@@ -66,6 +66,67 @@ def test_expedition_registry_and_schedule():
     assert blocks[0].per_map_frames == 1000 and blocks[0].legs == [("0,10", "0,16")]
 
 
+def test_nav_block_frame_budget_guard_cuts_unbounded_block(monkeypatch):
+    """W33 loop-bounding invariant at the INVOCATION layer (no emulator): a block that
+    ignores every internal budget is terminated at the next frame boundary by
+    run_nav_block's guard, marked over_budget, and the wrapper still finishes its
+    anchor-return/phase-restore path (attempt-4 pilots: one sweep with per-leg budgets
+    but no whole-block bound legally burned ~889k frames on every starter)."""
+    from collection.playthrough.blocks import base
+    import collection.navigator as nav
+
+    class FakeState:
+        in_battle = False
+        control_mode = "free_overworld"
+        map = "RUSTBORO CITY"
+        x, y = 5, 5
+
+    class FakeTerrain:
+        map_group, map_num = 0, 4
+
+    class FakeRunner:
+        frame_idx = 0
+
+        def step_frame(self, buttons, **kw):
+            self.frame_idx += 1
+
+        def state(self):
+            return FakeState()
+
+        def nav_state(self):
+            return FakeState()
+
+        def save_state_bytes(self):
+            return b"snap"
+
+        def set_phase(self, phase):
+            pass
+
+    class UnboundedBlock:
+        name = phase = "runaway"
+        frames = 500                                  # declared budget it will ignore
+
+        def run(self, runner, mk, ctx):
+            while True:                               # deliberately unbounded
+                runner.step_frame([])
+
+    monkeypatch.setattr(base, "_hstate", lambda runner, event_id="LIFE_BLOCK": {})
+    monkeypatch.setattr(base, "is_dialog_open", lambda s: False)
+    monkeypatch.setattr(base, "_settle_for_block", lambda runner, **kw: FakeState())
+    monkeypatch.setattr(base, "_return_to_anchor_nav", lambda *a, **kw: True)
+    monkeypatch.setattr(nav, "_state", lambda runner: (FakeTerrain(), 5, 5))
+
+    r = FakeRunner()
+    out = base.run_nav_block(r, UnboundedBlock(), mk=object())
+    assert out["over_budget"] is True
+    assert out["ran"] is True and out["returned"] is True
+    assert "BlockBudgetExceeded" in out["error"]
+    assert r.frame_idx <= 500 + base._BLOCK_BUDGET_SLACK + 1
+    # a step after the guard fired would raise again; the wrapper restored the method
+    r.step_frame([])
+    assert r.frame_idx == 500 + base._BLOCK_BUDGET_SLACK + 1
+
+
 # ---------------------------------------------------------------------------
 # acceptance 1: sweep coverage + phase tag + anchor return (small indoor map)
 

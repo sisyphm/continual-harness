@@ -223,105 +223,13 @@ def run_milestone(
         last_frame_seen = runner.frame_idx
         if tic_fn is not None:
             tic_fn()
-        # OFF-MAP GOAL PRE-CHECK. Do not wait for a stall: the policy retries for
-        # minutes while the frame counter keeps moving, so a stall detector never
-        # trips and the fallback below was dead code (measured: exp_008_treecko
-        # failed 8 times on goal (4,-1) with zero fallback fires). If the target lies
-        # outside this map, the ONLY way there is the connection in that direction,
-        # so cross it now with our navigator. Once per milestone attempt.
-        if not _crossed_once and expected_state is not None:
-            _gx = getattr(expected_state, "x", None)
-            _gy = getattr(expected_state, "y", None)
-            if _gx is not None and _gy is not None:
-                from collection import navigator as _nav
-                _t, _, _ = _nav._state(runner)
-                if _t is not None and not (0 <= _gx < _t.map_width
-                                           and 0 <= _gy < _t.map_height):
-                    _d = (2 if _gy < 0 else 1 if _gy >= _t.map_height else
-                          3 if _gx < 0 else 4)
-                    _crossed_once = True
-                    _mk = _nav.MapKnowledge()
-                    _key = f"{_t.map_group},{_t.map_num}"
-                    _conns = {c.get("direction") for c in _mk.connections.get(_key, [])}
-                    if _d in _conns:
-                        _r = _nav.cross_connection(runner, _mk, _d, budget=20_000)
-                        _how = f"crossed dir {_d}"
-                    else:
-                        # No connection that way: this is an interior, and a building is
-                        # left through a scripted door the policy already knows. Do
-                        # NOTHING rather than invent a route — an earlier version walked
-                        # at the wall of Birch's lab (13x13, goal y=17) and then tried
-                        # its warps, both 'stuck', purely wasting the budget.
-                        _r = "skipped (interior)"
-                        _how = f"no conn dir {_d}"
-                    print(f"spine pre-check: goal ({_gx},{_gy}) off-map "
-                          f"{_t.map_width}x{_t.map_height}; {_how} -> {_r}", flush=True)
-        # BLOCKED-GOAL PRE-CHECK (same reasoning as the off-map one above: do not wait
-        # for a stall, because during a dry solve the frame counter keeps moving and no
-        # stall is ever detected). If the goal tile is on THIS map but not walkable, it
-        # is an NPC's own square — TRAINER_JOSH_BATTLE and ROXANNE_BATTLE both target
-        # (5,3) inside RUSTBORO CITY GYM, where Josh stands — so no route can ever end
-        # there and the policy prints 'No progress possible' forever. Adjacency is all
-        # a talk or sight trigger needs, so walk next to it with our navigator.
-        if not _adjacent_once and expected_state is not None:
-            _gx = getattr(expected_state, "x", None)
-            _gy = getattr(expected_state, "y", None)
-            _em = getattr(expected_state, "map", None)
-            if _gx is not None and _gy is not None and _em \
-                    and runner.nav_state().map == _em:
-                import numpy as _np
-                from collection import navigator as _nav
-                _t, _, _ = _nav._state(runner)
-                if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height \
-                        and ((_t.grid[_gy + 7, _gx + 7] >> 10) & 3) != 0:
-                    _adjacent_once = True
-
-                    def _goal(t, beh, gx=_gx, gy=_gy):
-                        m = _np.zeros(t.grid.shape, bool)
-                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
-                            yy, xx = gy + dy + 7, gx + dx + 7
-                            if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
-                                m[yy, xx] = True
-                        return m & (((t.grid >> 10) & 3) == 0)
-
-                    _r = _nav.goto(runner, _nav.MapKnowledge(), _goal,
-                                   budget=12_000, phase="spine")
-                    print(f"spine pre-check: goal ({_gx},{_gy}) is a blocked tile on "
-                          f"{_em}; walked adjacent -> {_r}", flush=True)
-        # WRONG-MAP GOAL reachable only through a DOOR. The goal is not off-map (so the
-        # connection pre-check misses it) and is walkable here (so the blocked-tile one
-        # misses it) — it simply belongs to another map. Measured: exp_013 stood in
-        # RUSTBORO CITY at (16,39) pathing to (5,3) in RUSTBORO CITY GYM, a tile that
-        # also exists in the city, so the policy walked confidently to the wrong place
-        # forever. There is no map-name -> map-key table, but we do not need one: try
-        # this map's warps until the map NAME matches what the milestone expects.
-        if not _warped_once and expected_state is not None:
-            _em = getattr(expected_state, "map", None)
-            if _em and runner.nav_state().map != _em:
-                from collection import navigator as _nav
-                _t, _, _ = _nav._state(runner)
-                if _t is not None:
-                    _mk = _nav.MapKnowledge()
-                    _key = f"{_t.map_group},{_t.map_num}"
-                    _warps = (_mk.warps.get(_key) or [])[:8]
-                    _warped_once = True
-                    for _wp in _warps:
-                        if runner.frame_idx - t_start_frames > 60_000:
-                            break
-                        _r = _nav.goto_warp(runner, _mk, _wp["x"], _wp["y"], budget=6_000)
-                        if runner.nav_state().map == _em:
-                            print(f"spine pre-check: entered {_em} via warp "
-                                  f"({_wp['x']},{_wp['y']})", flush=True)
-                            break
-                        if _r == "crossed":          # wrong building — step back out
-                            _t2, _, _ = _nav._state(runner)
-                            _k2 = None if _t2 is None else f"{_t2.map_group},{_t2.map_num}"
-                            _back = (_mk.warps.get(_k2) or [])[:1]
-                            if _back:
-                                _nav.goto_warp(runner, _mk, _back[0]["x"], _back[0]["y"],
-                                               budget=6_000)
-                    else:
-                        print(f"spine pre-check: no warp on {_key} led to {_em}", flush=True)
+        # (Two pre-checks lived here — off-map goal and blocked-tile goal — and both
+        # are REVERTED. They ran BEFORE the policy on every iteration, and the
+        # milestone sweep measured the cost: 46/51 transitions passed before them,
+        # 37/51 after. They broke nine milestones that had always worked, including
+        # EXIT_RIVAL_HOUSE -> LITTLEROOT_TO_ROUTE101, which stalled all ten runs of
+        # wave 10. Acting ahead of the policy on a guess is far more dangerous than
+        # reacting to a proven stall; the stall-triggered recovery below stays.)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
