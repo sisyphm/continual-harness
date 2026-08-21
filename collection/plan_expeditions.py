@@ -523,8 +523,23 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
     # cutscene before the gym. The anchor maps must have land wild tables.
     _GRIND_LEGS = (              # (stage, grass map key) in spine order, heal between
         ("ROUTE_104_NORTH", "0,19"),
-        ("RUSTBORO_CENTER_EXITED", "0,19"),
-    )
+        ("RUSTBORO_CENTER_EXITED", "0,31"),   # leg 2 on Route 116 (the map the frozen
+    )                                         # evolution proof was ground on): hop
+    # Rustboro<->116 re-verified live post seam fix (1046/972 frames; the earlier
+    # 110k hop burn was the stale-src seam race). 116's Center heal is one
+    # connection + one door away — no pond, no double-battle cork.
+    # torchic XP sweeps (08-21): wild-only grinding cannot reach L16 — heal trips
+    # across the 104 pond are corked by the Gina&Mia double (id 483) parked at
+    # (27,15)-(28,15): a single-mon party can't battle them and they never move.
+    # So torchic runs fight the optional singles the scripted chain bypasses
+    # (owner-endorsed trainer-XP design): Winston 136 + Haley 604 + James 621
+    # near the leg-1 anchor, then Route 116 singles post-heal before leg 2.
+    # Flags = 0x500 + script trainer id (empirically verified, see the block).
+    _TORCHIC_SWEEPS = {
+        "ROUTE_104_NORTH": [("0,19", 0x588), ("0,19", 0x75C), ("24,11", 0x76D)],
+        "RUSTBORO_CENTER_EXITED": [("0,31", 0x769), ("0,31", 0x642),
+                                   ("0,31", 0x618), ("0,31", 0x75D)],
+    }
     for _stage, _gmap in _GRIND_LEGS:
         assert _stage in SAFE_ANCHORS, f"grind leg stage {_stage} not an eligible anchor"
         assert "land" in manifest["wild"].get(_gmap, {}), \
@@ -534,6 +549,13 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                       key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
         for r in cand[:fl["grind_runs_per_starter"]]:
             for _stage, _gmap in _GRIND_LEGS:
+                if r["starter"] == "torchic":
+                    _tt = _TORCHIC_SWEEPS[_stage]
+                    add(r, _stage, "trainer_engagement",
+                        {"targets": [{"map": m, "trainer_flag": f} for m, f in _tt],
+                         "frames": TRAINER_BLOCK_FRAMES + 40_000,
+                         "seed": rng.getrandbits(20)},
+                        "encounter", EST_TRAINER_BASE + len(_tt) * EST_TRAINER_FRAMES)
                 add(r, _stage, "grind_evolve",
                     {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
                      "grass_map": _gmap, "heal_center": GRIND_HEAL_CENTER,
@@ -591,7 +613,11 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
             sched.append([_midx(stage), "bfs_sweep", a])
         for b in rest:
             sched.append([_midx(b["stage"]), b["block"], b["args"]])
-        sched.sort(key=lambda e: (e[0], e[1], json.dumps(e[2], sort_keys=True)))
+        # within a milestone, trainer sweeps run FIRST: they need the spine-fresh
+        # lead (hp_floor aborts them), while a grind leg ends at the hp floor anyway
+        _prio = {"trainer_engagement": 0}
+        sched.sort(key=lambda e: (e[0], _prio.get(e[1], 1), e[1],
+                                  json.dumps(e[2], sort_keys=True)))
         shares = {ph: round(v * 100 / RUN_FRAMES_TARGET, 1)
                   for ph, v in load[r["run_id"]].items()}
         warns = [f"{ph} est {shares[ph]}% > target {caps[ph]}%"
