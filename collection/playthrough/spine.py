@@ -42,7 +42,19 @@ def _battle_protected(runner, rounds: int = 160) -> None:
     declines the swap) before resuming the steer.
     """
     from collection import navigator as _nav
-    from collection.playthrough.blocks.grind_evolve import read_lead as _rl
+    from collection.extractors.ram import GBAState as _GS
+    from collection.extractors.ledger_panel import _battle_mon as _bm
+
+    def _rl(_r):
+        # Read the BATTLE structure, not the party. read_lead decrypts the party mon
+        # and throws mid-battle on some states ("... is not a valid Move"), returning
+        # None at exactly the level-up we are watching for -- so every guard built on
+        # it silently skipped and Peck ate Double Kick regardless.
+        try:
+            return _bm(_GS(env=_r.env), 0)
+        except Exception:
+            return None
+
     _KEEP = 24                                   # Double Kick
     _lv = (_rl(runner) or {}).get("level")
     _seq = ("UP", "LEFT", "A")
@@ -61,13 +73,18 @@ def _battle_protected(runner, rounds: int = 160) -> None:
             # (A = Yes). Mashing B alone just bounces between the two boxes until the
             # steer resumes and its A confirms the delete -- which is why the lead kept
             # arriving at Roxanne holding Peck.
-            for _ in range(6):
+            # Don't fight the prompt -- REDIRECT it. Declining takes two correctly
+            # timed answers ("delete a move?" No, then "give up learning?" Yes) and
+            # every variant of that still lost the move. Accepting is deterministic:
+            # say yes, then walk the forget-cursor DOWN off slot 0 (Double Kick) onto
+            # slot 1 (Growl) and confirm. Peck replaces the junk move, Double Kick --
+            # the only thing that beats her rock types -- survives.
+            for _ in range(4):
                 if _KEEP not in set((_rl(runner) or {}).get("moves") or ()):
                     break                        # already gone; stop burning frames
-                runner.perform_action("B")
-                _nav._hold(runner, [], 40, "spine")
-                runner.perform_action("A")
-                _nav._hold(runner, [], 40, "spine")
+                for _k in ("A", "DOWN", "A", "A"):
+                    runner.perform_action(_k)
+                    _nav._hold(runner, [], 40, "spine")
                 if not runner.nav_state().in_battle:
                     break
             _lv = _cur["level"]
