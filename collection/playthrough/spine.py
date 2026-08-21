@@ -91,6 +91,7 @@ def run_milestone(
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
     _warped_once = False                  # door search fires at most once per attempt
+    _adjacent_once = False                # blocked-goal walk fires at most once too
     _adjacent_once = False                # blocked-goal pre-check, likewise
     _warped_once = False                  # wrong-map (door) pre-check, likewise
     t_start_frames = runner.frame_idx
@@ -301,6 +302,37 @@ def run_milestone(
                             if _back:
                                 _nav.goto_warp(runner, _mk, _back[0]["x"], _back[0]["y"],
                                                budget=6_000)
+        # BLOCKED GOAL ON THIS MAP: the target tile is an NPC's own square, so no route
+        # can ever end there. ROXANNE_BATTLE and TRAINER_JOSH_BATTLE both target (5,3)
+        # inside RUSTBORO CITY GYM, where the trainer stands — exp_031 reached the gym
+        # and then burned 2,039,665 frames over five attempts without ever starting the
+        # fight. Adjacency is all a talk or sight trigger needs. Same stall gate as the
+        # other recoveries, so it cannot fire speculatively.
+        if _stuck_pos and not _adjacent_once and expected_state is not None:
+            _em = getattr(expected_state, "map", None)
+            _gx = getattr(expected_state, "x", None)
+            _gy = getattr(expected_state, "y", None)
+            if _em and _gx is not None and _gy is not None \
+                    and runner.nav_state().map == _em:
+                import numpy as _np
+                from collection import navigator as _nav
+                _t, _, _ = _nav._state(runner)
+                if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height \
+                        and ((_t.grid[_gy + 7, _gx + 7] >> 10) & 3) != 0:
+                    _adjacent_once = True
+
+                    def _goal(t, beh, gx=_gx, gy=_gy):
+                        m = _np.zeros(t.grid.shape, bool)
+                        for dx, dy in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+                            yy, xx = gy + dy + 7, gx + dx + 7
+                            if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
+                                m[yy, xx] = True
+                        return m & (((t.grid >> 10) & 3) == 0)
+
+                    _r = _nav.goto(runner, _nav.MapKnowledge(), _goal, budget=12_000,
+                                   phase="spine")
+                    print(f"spine: stuck, goal ({_gx},{_gy}) is an occupied tile on "
+                          f"{_em}; walked adjacent -> {_r}", flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
