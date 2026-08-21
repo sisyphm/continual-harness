@@ -186,7 +186,7 @@ ENC_BLOCK_FRAMES = 35_000       # one encounter block ~= the per-run encounter b
 # 12->16, plus ~5-8k frames per nurse round trip — ~110k worst case across cycles;
 # 100k per leg with two legs gives ample headroom. The block ends early on
 # target_level, so the budget is a cap, not a cost.
-GRIND_FRAMES = 520_000   # L16 from any start: measured ~90k/level top-end + two-floor grind (08-21)
+GRIND_FRAMES = 200_000   # measured: a successful grind reaches L16 and evolves in ~96k frames (exp_004: 49 wins) — 520k just parked runs in a block for an hour
 # Center interior for mid-grind nurse trips (Rustboro's, adjacent to both legs'
 # grass): restores the REAL sustain constraint, PP, along with HP.
 GRIND_HEAL_CENTER = "11,5"
@@ -569,7 +569,7 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                 # hp floor, so the levels come from REPEATING the proven block at the
                 # Center-adjacent anchor (each one heals there first) instead of from
                 # a trainer sweep, which blew its budget and got rolled back twice.
-                _reps = 3 if (r["starter"] == "torchic"
+                _reps = 2 if (r["starter"] == "torchic"
                               and _stage == "RUSTBORO_CENTER_EXITED") else 1
                 for _rep in range(_reps):
                     add(r, _stage, "grind_evolve",
