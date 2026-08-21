@@ -6,6 +6,7 @@ management. All decision predicates are imported from collect_events (single sou
 of truth — collect_events itself is untouched and keeps working).
 """
 from __future__ import annotations
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ def run_milestone(
     blocked_nav_actions: int = 120,
     starter: str = "mudkip",
     tic_fn=None,
+    max_wall_s: float = 480.0,
 ) -> dict:
     """Drive `runner` with policy `event_id` until its postcondition. Returns a dict
     {validation: passed|failed|skipped, failure_reason, actions_taken, start_frame,
@@ -52,8 +54,18 @@ def run_milestone(
     persona-seeded closure that occasionally emits a recorded human tic (short pause /
     facing flick) through runner.step_frame — during a solve-then-record DRY attempt
     those frames land in the capture log and are replayed like everything else, so
-    the tic is simply part of the button schedule."""
+    the tic is simply part of the button schedule.
+
+    `max_wall_s` (W33 loop-bounding invariant): every attempt is bounded by ACTIONS
+    and by WALL TIME. The action-denominated stall detector is resettable — wild
+    battles/dialogs zero it — so a stranded policy chasing an unreachable goal
+    through encounter territory (the RUSTBORO_CENTER_ENTERED wedge: blocks left the
+    runner mid-battle on ROUTE 104, the policy then pathed its Rustboro door coords
+    against the wrong map for hours) could otherwise outlive any frame budget in
+    wall-clock terms. Breaching the cap fails the attempt like a stall; the
+    solve-then-record retry/abort machinery above stays in charge."""
     policy = HeatzPolicy(event_id, Path(policy_dir) / event_id / f"{event_id}.py")
+    t_start = time.monotonic()
     start_frame = runner.frame_idx
     start_state = runner.state()
     validation = "failed"
@@ -86,6 +98,9 @@ def run_milestone(
                     actions_taken=0, start_frame=start_frame, end_frame=runner.frame_idx)
 
     for _ in range(max_actions):
+        if max_wall_s and time.monotonic() - t_start > max_wall_s:
+            failure_reason = "wall_time_exceeded"
+            break
         if tic_fn is not None:
             tic_fn()
         policy_source = "heatz"

@@ -37,20 +37,38 @@ class BfsSweep:
     phase = "bfs_sweep"
 
     def __init__(self, maps: list[str], legs: list | tuple = (),
-                 per_map_frames: int = 45000, leg_frames: int = 15000):
+                 per_map_frames: int = 45000, leg_frames: int = 15000,
+                 frames: int | None = None):
         self.maps = list(dict.fromkeys(maps))        # map keys "group,num", deduped in order
         self.legs = [tuple(l) for l in legs]         # (mapA, mapB) connection pairs
         self.per_map_frames = per_map_frames
         self.leg_frames = leg_frames
+        # Whole-block frame budget (W33 loop-bounding invariant): LINEAR in the work
+        # list — each map tour gets per_map_frames ONCE (its ensure-map included) and
+        # each directional leg gets leg_frames ONCE (ensure + crossing retries
+        # included). Every other block already had a whole-block deadline; without
+        # one here, retry multiplication (3x ensure x 3x cross x 2 directions x
+        # N legs) legally burned ~1M frames on plans with unreachable leg endpoints
+        # (attempt-4 pilots: all three runs stuck in one RUSTBORO sweep at 3.5x the
+        # plan's WHOLE-RUN frame target).
+        self.frames = frames if frames is not None else (
+            per_map_frames * len(self.maps) + 2 * leg_frames * len(self.legs))
 
     # ---------------------------------------------------------------- helpers
 
     def _ensure_map(self, runner, mk, key: str, summary: dict, *, budget: int) -> bool:
+        # `budget` is the TOTAL frame allotment for reaching `key` — the retry loop
+        # shares one deadline instead of re-granting the full budget per try (the
+        # W33 loop-bounding invariant: retries always consume the same budget).
+        deadline = runner.frame_idx + max(0, budget)
         for _ in range(3):
             t, _, _ = nav._state(runner)
             if t is not None and f"{t.map_group},{t.map_num}" == key:
                 return True
-            r = nav.goto_map(runner, mk, key, hop_budget=budget)
+            left = deadline - runner.frame_idx
+            if left <= 0:
+                break
+            r = nav.goto_map(runner, mk, key, hop_budget=left)
             if r == "battle":
                 flee_battle(runner)
                 summary["battles_fled"] += 1
@@ -62,7 +80,7 @@ class BfsSweep:
 
     # ---------------------------------------------------------------- tile tour
 
-    def _tour(self, runner, mk, key: str, summary: dict) -> None:
+    def _tour(self, runner, mk, key: str, summary: dict, *, hard_deadline: int | None = None) -> None:
         kg = tuple(int(v) for v in key.split(","))
         warp_tiles = {(w["x"], w["y"]) for w in mk.warps.get(key, [])}
         visited: set[tuple[int, int]] = set()
@@ -71,6 +89,8 @@ class BfsSweep:
         walkable_total = 0
         remaining = [None]                           # unvisited ∧ not perma-denied, per replan
         deadline = runner.frame_idx + self.per_map_frames
+        if hard_deadline is not None:
+            deadline = min(deadline, hard_deadline)  # whole-block budget wins
 
         def visit(t, x, y):
             if (t.map_group, t.map_num) == kg and 0 <= x < t.map_width and 0 <= y < t.map_height:
@@ -113,7 +133,7 @@ class BfsSweep:
                 summary["battles_fled"] += 1
             elif r == "left_map":                    # scripted warp/trigger pulled us out
                 if not self._ensure_map(runner, mk, key, summary,
-                                        budget=max(2000, deadline - runner.frame_idx)):
+                                        budget=max(0, deadline - runner.frame_idx)):
                     break
             elif r == "stuck":
                 if remaining[0] is not None and remaining[0] <= 0:
@@ -144,22 +164,40 @@ class BfsSweep:
 
     # ---------------------------------------------------------------- direction legs
 
-    def _cross(self, runner, mk, src: str, dst: str, summary: dict) -> bool:
+    def _cross(self, runner, mk, src: str, dst: str, summary: dict,
+               *, hard_deadline: int | None = None) -> bool:
         """One directional crossing src→dst through the DIRECT manifest hop.
-        Failures are REPORTED in summary["connections_failed"], never silently dropped."""
+        Failures are REPORTED in summary["connections_failed"], never silently dropped.
+        The whole crossing — ensure-src + up to 3 attempts — shares ONE leg_frames
+        deadline (capped by the block's hard_deadline): the W33 loop-bounding
+        invariant; previously each retry re-granted the full budget."""
         def fail(reason: str) -> bool:
             summary["connections_failed"].append([src, dst, reason])
             return False
 
-        if not self._ensure_map(runner, mk, src, summary, budget=self.leg_frames):
+        def now() -> int:
+            return getattr(runner, "frame_idx", 0)   # unit tests drive _cross runner-less
+
+        leg_deadline = now() + self.leg_frames
+        if hard_deadline is not None:
+            leg_deadline = min(leg_deadline, hard_deadline)
+
+        def left() -> int:
+            return max(0, leg_deadline - now())
+
+        if left() == 0:
+            return fail("leg_budget_expired")
+        if not self._ensure_map(runner, mk, src, summary, budget=left()):
             return fail("src_unreached")
         conn = next((c for c in mk.connections.get(src, []) if c["dst_map"] == dst), None)
         warp = next((w for w in mk.warps.get(src, []) if w["dst_map"] == dst), None)
         for _ in range(3):
+            if left() == 0:
+                return fail("leg_budget_expired")
             if conn is not None:
-                r = nav.cross_connection(runner, mk, conn["direction"], budget=self.leg_frames)
+                r = nav.cross_connection(runner, mk, conn["direction"], budget=left())
             elif warp is not None:
-                r = nav.goto_warp(runner, mk, warp["x"], warp["y"], budget=self.leg_frames)
+                r = nav.goto_warp(runner, mk, warp["x"], warp["y"], budget=left())
             else:
                 return fail("no_direct_hop")
             if r == "battle":
@@ -180,11 +218,20 @@ class BfsSweep:
                        connections_failed=[], battles_fled=0,
                        unreached_maps=[], budget_expired_maps=[], frames=0)
         f0 = runner.frame_idx
+        deadline = f0 + self.frames                  # whole-block budget (see __init__)
         for key in self.maps:
-            if self._ensure_map(runner, mk, key, summary, budget=self.per_map_frames):
-                self._tour(runner, mk, key, summary)
+            budget_left = deadline - runner.frame_idx
+            if budget_left <= 0:
+                summary["block_budget_expired"] = True
+                break
+            if self._ensure_map(runner, mk, key, summary,
+                                budget=min(self.per_map_frames, budget_left)):
+                self._tour(runner, mk, key, summary, hard_deadline=deadline)
         for a, b in self.legs:
-            if self._cross(runner, mk, a, b, summary):
-                self._cross(runner, mk, b, a, summary)
+            if deadline - runner.frame_idx <= 0:
+                summary["block_budget_expired"] = True
+                break
+            if self._cross(runner, mk, a, b, summary, hard_deadline=deadline):
+                self._cross(runner, mk, b, a, summary, hard_deadline=deadline)
         summary["frames"] = runner.frame_idx - f0
         return summary

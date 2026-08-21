@@ -157,7 +157,11 @@ TRAINER_BLOCK_FRAMES = 60_000   # generous block deadline (est governs the load)
 # a wrong guess skips cleanly (precondition seam) and shows up as an audit deficit.
 PILOT_VERIFY_ANCHORS = {"TRAINER_JOSH_BATTLE", "ROXANNE_BATTLE",
                         "MAY_ROUTE103_INTERACTION", "BACK_TO_OLDALE_FROM_ROUTE103",
-                        "TEAM_AQUA_GRUNT_DEFEATED"}
+                        "TEAM_AQUA_GRUNT_DEFEATED",
+                        # W33 grind leg 2: freshly healed boundary (the spine's
+                        # HEAL_AT_RUSTBORO_CENTER just restored HP+PP), back in free
+                        # overworld outside the Center — hosts the evolution grind.
+                        "RUSTBORO_CENTER_EXITED"}
 
 # Milestone boundaries INELIGIBLE for block placement (live pilot evidence): these
 # milestones' completed checkpoints sit on a SCRIPTED TAIL with no free-overworld
@@ -176,7 +180,16 @@ SAFE_ANCHORS = sorted((_WANDER_OK | PILOT_VERIFY_ANCHORS) - INELIGIBLE_BLOCK_BOU
 EXCLUDED_MAPS = {"25,40"}       # intro truck interior (see module docstring)
 SURF_GATED_LAND = {"0,30"}      # audits/coverage.py access policy
 ENC_BLOCK_FRAMES = 35_000       # one encounter block ~= the per-run encounter budget
-GRIND_FRAMES = 45_000
+# Per-LEG grind budget (two legs around the Rustboro heal, each heal-capable — see
+# the grind_evolve scheduling comment). Sized from the pilot's measured rates:
+# ~1.9k frames per won battle, ~9-15 wins per full-HP/PP cycle, ~30 wins for
+# 12->16, plus ~5-8k frames per nurse round trip — ~110k worst case across cycles;
+# 100k per leg with two legs gives ample headroom. The block ends early on
+# target_level, so the budget is a cap, not a cost.
+GRIND_FRAMES = 520_000   # L16 from any start: measured ~90k/level top-end + two-floor grind (08-21)
+# Center interior for mid-grind nurse trips (Rustboro's, adjacent to both legs'
+# grass): restores the REAL sustain constraint, PP, along with HP.
+GRIND_HEAL_CENTER = "11,5"
 GRIND_TARGET_LEVEL = 16         # all three starters evolve at 16
 IDLE_FRAMES, MENUS_FRAMES = 4000, 6000
 
@@ -495,15 +508,36 @@ def build_plan(*, n_runs: int = 50, seed: int = 33,
                  "frames": TRAINER_BLOCK_FRAMES, "seed": rng.getrandbits(20)},
                 "encounter", EST_TRAINER_BASE + len(t_flags) * EST_TRAINER_FRAMES)
 
-    # -- grind_evolve: per starter, on that starter's own non-holdout runs
-    grind_stage = "RUSTBORO_CITY"
+    # -- grind_evolve: per starter, on that starter's own non-holdout runs, in TWO
+    # legs split across the Rustboro Center heal (W33 pilot, all measured). One
+    # uninterrupted grind cannot reach the L16 evolution threshold: ~30+ won battles
+    # on Route 104's L3-4 wilds exhausts attacking PP and drags HP down toward
+    # hp_floor — two torchic runs stalled at L14 (45k ended=budget; 150k guard-cut
+    # at hp 13) — and the higher-XP Route 116 alternative is not plannable from
+    # Rustboro (goto_map burned 110k frames failing the hop;
+    # ended=grass_map_unreachable). Leg 1 grinds Route 104 grass at the
+    # ROUTE_104_NORTH boundary (12 -> ~14, ends honestly on budget/hp_floor); the
+    # spine's HEAL_AT_RUSTBORO_CENTER milestone then restores HP+PP; leg 2 at
+    # RUSTBORO_CENTER_EXITED hops back to the same grass with fresh resources
+    # (14 -> 16 is ~15 wins, well inside one PP budget) and delivers the evolution
+    # cutscene before the gym. The anchor maps must have land wild tables.
+    _GRIND_LEGS = (              # (stage, grass map key) in spine order, heal between
+        ("ROUTE_104_NORTH", "0,19"),
+        ("RUSTBORO_CENTER_EXITED", "0,19"),
+    )
+    for _stage, _gmap in _GRIND_LEGS:
+        assert _stage in SAFE_ANCHORS, f"grind leg stage {_stage} not an eligible anchor"
+        assert "land" in manifest["wild"].get(_gmap, {}), \
+            f"grind leg map {_gmap} has no land wild table"
     for st in STARTERS:
         cand = sorted((r for r in workers if r["starter"] == st),
                       key=lambda r: (load[r["run_id"]]["grind_idle"], r["run_id"]))
         for r in cand[:fl["grind_runs_per_starter"]]:
-            add(r, grind_stage, "grind_evolve",
-                {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
-                 "seed": rng.getrandbits(20)}, "grind_idle", GRIND_FRAMES)
+            for _stage, _gmap in _GRIND_LEGS:
+                add(r, _stage, "grind_evolve",
+                    {"target_level": GRIND_TARGET_LEVEL, "frames": GRIND_FRAMES,
+                     "grass_map": _gmap, "heal_center": GRIND_HEAL_CENTER,
+                     "seed": rng.getrandbits(20)}, "grind_idle", GRIND_FRAMES)
 
     # -- idle / menus sprinkled (deterministic fix-up guarantees the floor)
     want_idle = max(1, n_runs // fl["idle_run_share"])

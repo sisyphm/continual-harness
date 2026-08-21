@@ -367,6 +367,13 @@ def cross_connection(runner, mk: MapKnowledge, direction: int, *, budget: int = 
             return "crossed"
         return None
 
+    # A reachable edge tile is NOT always crossable: the beyond-edge buffer can be
+    # void at that column (measured on ROUTE_104 north: columns 11/17 dead, 16 live —
+    # 32/32 real crossings use 16). Nearest-edge choice therefore deadlocks
+    # deterministically. Blacklist failed columns and retry the crossing at the next
+    # candidate instead of walking back to the same dead tile forever.
+    failed_cols: set = set()
+
     def goal(t, beh):
         e = edge(t) if callable(edge) else edge
         m = np.zeros(t.grid.shape, bool)
@@ -374,16 +381,26 @@ def cross_connection(runner, mk: MapKnowledge, direction: int, *, budget: int = 
             m[e + 7, 7:7 + t.map_width] = True
         else:
             m[7:7 + t.map_height, e + 7] = True
-        return m & (((t.grid >> 10) & 3) == 0)
+        m &= ((t.grid >> 10) & 3) == 0
+        for fc in failed_cols:
+            if axis == "y":
+                m[e + 7, fc + 7] = False
+            else:
+                m[fc + 7, e + 7] = False
+        return m
 
-    r = goto(runner, mk, goal, budget=budget, phase="nav_conn", stop_fn=crossed)
-    if r != "arrived":
-        return r
-    for _ in range(4):                                        # step off the edge, map-watched
-        _step(runner, d)
-        t, _, _ = _state(runner)
-        if t is not None and (c := crossed(t)):
-            return c
+    for _attempt in range(6):
+        r = goto(runner, mk, goal, budget=budget, phase="nav_conn", stop_fn=crossed)
+        if r != "arrived":
+            return r
+        for _ in range(4):                                    # step off the edge, map-watched
+            _step(runner, d)
+            t, _, _ = _state(runner)
+            if t is not None and (c := crossed(t)):
+                return c
+        t2, px, py = _state(runner)                           # step-off refused: dead column —
+        if t2 is not None:                                    # blacklist it and re-route
+            failed_cols.add(px if axis == "y" else py)
     return "stuck"
 
 

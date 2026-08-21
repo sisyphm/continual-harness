@@ -26,22 +26,46 @@ def _hstate(runner, event_id="LIFE_BLOCK"):
     return h
 
 
+def _settle_for_block(runner, *, max_actions: int = 60):
+    """Bounded ACTIVE settle at a block boundary (W33 blocks fix). The spine can hand
+    off on a script tail, and — worse — a previous same-boundary block that failed its
+    anchor return can leave a LIVE battle or dialog behind. The old settle (40 idle
+    frames) could clear neither, so every subsequent block at that boundary skipped on
+    precondition_not_overworld (pilot evidence: torchic/treecko each lost 3 of their 4
+    RUSTBORO_CITY blocks, including torchic's Roxanne-critical grind_evolve, after one
+    bfs_sweep ended off-anchor). Reuse the blocks' own safety intercepts — flee
+    battles, confirm dialogs, idle otherwise — bounded; if the world is still not
+    free-overworld afterwards the caller's skip stays clean."""
+    st = runner.state()
+    for _ in range(max_actions):
+        if not st.in_battle and st.control_mode == "free_overworld" and not is_dialog_open(_hstate(runner)):
+            break
+        h = _hstate(runner)
+        if st.in_battle:
+            runner.perform_action(normalize_action(handle_battle(h, strategy="run")),
+                                  metadata={"src": "block_settle"})
+        elif is_dialog_open(h):
+            runner.perform_action(normalize_action(navigate_ui(h, intent="confirm")),
+                                  metadata={"src": "block_settle"})
+        else:
+            for _ in range(4):
+                runner.step_frame([], phase="block_settle")
+        st = runner.state()
+    return st
+
+
 def run_block(runner, block, *, max_actions: int = 900) -> dict:  # rescaled for condition-based pacing (W33 §3.5)
     """Drive `runner` with `block.act` under the safety wrapper. `block` needs:
        .name, .setup(state)->anchor(x,y,map), .act(state, ctx)->(button|None; None=done)."""
     start_frame = runner.frame_idx
     # Settle: the spine may hand off on a script tail (a "skipped/already-complete"
-    # milestone). Advance a few frames until free overworld control, else skip cleanly.
-    st0 = runner.state()
-    for _ in range(40):
-        if not st0.in_battle and st0.control_mode == "free_overworld" and not is_dialog_open(_hstate(runner)):
-            break
-        runner.step_frame([], phase="block_settle")
-        st0 = runner.state()
+    # milestone) and an earlier block may have left a battle/dialog. Active, bounded.
+    st0 = _settle_for_block(runner)
     if st0.in_battle or is_dialog_open(_hstate(runner)) or st0.control_mode != "free_overworld":
         return dict(block=block.name, ran=False, reason="precondition_not_overworld",
                     frames=runner.frame_idx - start_frame, actions=0)
     anchor = (st0.map, st0.x, st0.y)
+    entry_snap = runner.save_state_bytes()
     ctx: dict[str, Any] = {"anchor": anchor}
     block.setup(_hstate(runner), ctx)
     actions = 0
@@ -73,9 +97,30 @@ def run_block(runner, block, *, max_actions: int = 900) -> dict:  # rescaled for
         aborted = "max_actions"
     # Return to the anchor tile so the next milestone starts where the spine left off.
     returned = _return_to_anchor(runner, anchor, block.name)
+    restored = False
+    if not returned:
+        # W33 anchor guarantee (same rule as run_nav_block): settle actively, and if
+        # the runner is off the anchor map or not cleanly in the overworld, RECORDED
+        # restore to the block-entry state so the spine can never start stranded.
+        st_end = _settle_for_block(runner)
+        if entry_snap is not None and (
+                st_end.map != anchor[0] or st_end.in_battle or st_end.control_mode != "free_overworld"):
+            runner.load_state_bytes(entry_snap, record=True)
+            restored = True
     return dict(block=block.name, ran=True, reason=aborted or "done", returned=returned,
+                restored_to_entry=restored,
                 anchor=list(anchor), actions=actions, encounters=ctx.get("encounters", 0),
                 frames=runner.frame_idx - start_frame)
+
+
+class BlockBudgetExceeded(RuntimeError):
+    """Raised by run_nav_block's frame guard when a block steps past its budget."""
+
+
+# Guard fallback for blocks that declare no `frames` budget, and slack over a block's
+# own deadline (a well-behaved block may overshoot by one navigator step's frames).
+DEFAULT_BLOCK_FRAME_BUDGET = 120_000
+_BLOCK_BUDGET_SLACK = 2_048
 
 
 def flee_battle(runner, max_actions: int = 40) -> bool:
@@ -105,28 +150,55 @@ def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict
     if mk is None:
         mk = nav.MapKnowledge()
     start_frame = runner.frame_idx
-    # Same settle/precondition seam as run_block. Dialog check is the VISION-validated
-    # heatz one — the raw BG0 window mask false-reads on stale post-close tiles (the
-    # documented no_dialog* limitation) and would veto perfectly clean states.
-    st0 = runner.state()
-    for _ in range(40):                              # settle a spine hand-off script tail
-        if not st0.in_battle and st0.control_mode == "free_overworld" and not is_dialog_open(_hstate(runner)):
-            break
-        runner.step_frame([], phase="block_settle")
-        st0 = runner.state()
+    # Same settle/precondition seam as run_block (active + bounded, W33 blocks fix).
+    # Dialog check is the VISION-validated heatz one — the raw BG0 window mask
+    # false-reads on stale post-close tiles (the documented no_dialog* limitation)
+    # and would veto perfectly clean states.
+    st0 = _settle_for_block(runner)
     t, x, y = nav._state(runner)
     if st0.in_battle or st0.control_mode != "free_overworld" or is_dialog_open(_hstate(runner)) or t is None:
         return dict(block=block.name, ran=False, reason="precondition_not_overworld",
                     frames=runner.frame_idx - start_frame)
     anchor = (f"{t.map_group},{t.map_num}", x, y)
+    entry_snap = runner.save_state_bytes()
     runner.set_phase(block.phase)
+    # W33 loop-bounding invariant, INVOCATION-layer enforcement: whatever the block's
+    # internal discipline, it cannot step past its declared frame budget (+slack) —
+    # the guard cuts it at the next frame boundary, the outcome is marked over_budget,
+    # and the wrapper's anchor-return/phase-restore/run-continues machinery proceeds.
+    # (Attempt-4 pilots: one sweep with per-leg budgets but no whole-block bound
+    # legally burned ~889k frames on every starter; internal budgets alone are trust,
+    # this is enforcement.)
+    budget = int(getattr(block, "frames", None) or DEFAULT_BLOCK_FRAME_BUDGET)
+    hard_stop = runner.frame_idx + budget + _BLOCK_BUDGET_SLACK
+    orig_step = runner.step_frame
+
+    def _guarded_step(*a, **kw):
+        if runner.frame_idx >= hard_stop:
+            raise BlockBudgetExceeded(
+                f"block {block.name!r} exceeded its frame budget ({budget} + slack)")
+        return orig_step(*a, **kw)
+
+    over_budget = False
     summary: dict = {}
+    ctx: dict = {"anchor": anchor}
+    runner.step_frame = _guarded_step
     try:
-        summary = block.run(runner, mk, {"anchor": anchor})
+        summary = block.run(runner, mk, ctx)
+    except BlockBudgetExceeded as e:
+        over_budget = True
+        # blocks that stash a live summary in ctx keep their partial counters even
+        # when the guard cuts them (W33: a guard-cut grind was losing its
+        # battles_won/final_level evidence exactly when it mattered most)
+        summary = dict(ctx.get("summary") or {})
+        summary["error"] = repr(e)
     except Exception as e:
         # block-never-breaks-the-spine: the error is RECORDED, never propagated; the
         # anchor return + phase restore below still run.
+        summary = dict(ctx.get("summary") or {})
         summary["error"] = repr(e)
+    finally:
+        runner.step_frame = orig_step
     returned = False
     try:
         returned = _return_to_anchor_nav(runner, mk, anchor, budget=return_budget)
@@ -135,8 +207,25 @@ def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict
         summary["return_error"] = repr(e)
     finally:
         runner.set_phase("spine")
+    if not returned:
+        # W33 anchor guarantee: a failed return can leave the runner stranded —
+        # mid-battle on a far map (the RUSTBORO wedge: the next spine milestone then
+        # pathed its target coords against the WRONG map's grid and wandered through
+        # encounter territory for hours). Settle actively; if the runner is still off
+        # the anchor MAP or not cleanly in the overworld, do a RECORDED restore to the
+        # block-entry state (honest in the recording: restore frame + manifest tally).
+        # A same-map clean drift is kept — spine policies handle same-map distance,
+        # and restoring would needlessly discard the block's world effects (XP etc.).
+        st_end = _settle_for_block(runner)
+        t2, x2, y2 = nav._state(runner)
+        on_anchor_map = t2 is not None and f"{t2.map_group},{t2.map_num}" == anchor[0]
+        if entry_snap is not None and (
+                not on_anchor_map or st_end.in_battle or st_end.control_mode != "free_overworld"):
+            runner.load_state_bytes(entry_snap, record=True)
+            summary["restored_to_entry"] = True
     # `frames` (in **summary) = the block's own work; frames_total adds settle + return.
     return dict(block=block.name, ran=True, anchor=list(anchor), returned=returned,
+                over_budget=over_budget, frame_budget=budget,
                 frames_total=runner.frame_idx - start_frame, **summary)
 
 

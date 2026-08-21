@@ -73,11 +73,76 @@ class GrindEvolve:
     phase = "grind"
 
     def __init__(self, target_level: int, frames: int = 60000, seed: int = 0,
-                 hp_floor: float = 0.30):
+                 hp_floor: float = 0.30, grass_map: str | None = None,
+                 heal_center: str | None = None, max_heals: int = 3):
         self.target_level = int(target_level)
         self.frames = frames                     # whole-block frame budget
         self.seed = seed
         self.hp_floor = hp_floor
+        # Planner-designated grassy map (W33 grind fix): if set and the anchor is a
+        # different map, hop there first — a grassless anchor (old RUSTBORO_CITY
+        # placement) otherwise turns the whole block into a silent no-op.
+        self.grass_map = grass_map
+        # W33 sustain fix (measured): with no items, HP chip + PP exhaustion cap an
+        # unhealed grind at ~9-15 won battles (~+2 levels) — L16 from L12 is
+        # unreachable in one sitting (torchic stalled at L13/L14 across three runs).
+        # When `heal_center` (a Center interior map key) is set, an hp_floor breach
+        # becomes a bounded nurse trip (goto center -> nurse at (7,2) -> full heal
+        # restores HP+PP -> hop back to grass) instead of ending the block, up to
+        # `max_heals` cycles. Without it the old end-on-hp_floor behavior stands.
+        self.heal_center = heal_center
+        self.max_heals = int(max_heals)
+
+    def _goto_map_safe(self, runner, mk, key: str, deadline: int) -> bool:
+        """Bounded cross-map hop with battle-flee retry; True iff we stand on `key`.
+        Six attempts, not two (W33, measured): the heal trip starts INSIDE grass, so
+        walking out draws wild encounters — a 2-try hop died to the second battle
+        every time (leg 1 ended lead_hp_low with zero heal_trip actions) while the
+        anchor-return machinery's 6-flee tolerance crosses fine."""
+        from collection.playthrough.blocks.base import flee_battle
+        for _ in range(6):
+            t, _, _ = nav._state(runner)
+            if t is None and runner.nav_state().in_battle:
+                # terrain reads None for the whole battle (gBackupMapLayout torn
+                # down) — goto_map would burn its holds inside the battle screen
+                # (measured: 6 x 360 frames of nothing). Leave the battle first.
+                flee_battle(runner)
+                continue
+            if t is not None and f"{t.map_group},{t.map_num}" == key:
+                return True
+            if runner.frame_idx >= deadline:
+                return False
+            r = nav.goto_map(runner, mk, key,
+                             hop_budget=max(0, min(20_000, deadline - runner.frame_idx)))
+            if r == "battle":
+                flee_battle(runner)
+                continue
+            break
+        t, _, _ = nav._state(runner)
+        return t is not None and f"{t.map_group},{t.map_num}" == key
+
+    def _heal_at_center(self, runner, mk, deadline: int) -> bool:
+        """Nurse-heal trip: enter the Center, walk to the nurse at (7, 2) — the
+        pathfinder auto-presses A when adjacent and facing an NPC — and confirm
+        dialogs until the lead reads full HP (the nurse restores PP with it, the
+        actual sustain constraint). Bounded by actions and the caller's deadline."""
+        from collection.playthrough.blocks.base import _hstate
+        from collection.heatz_adapter import find_path_action, is_dialog_open, navigate_ui
+        from collection.actions import normalize_action
+        if not self._goto_map_safe(runner, mk, self.heal_center, deadline):
+            return False
+        for _ in range(160):
+            if runner.frame_idx >= deadline:
+                return False
+            lead = read_lead(runner)
+            if lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"]:
+                return True
+            h = _hstate(runner)
+            act = navigate_ui(h, intent="confirm") if is_dialog_open(h) else find_path_action(h, 7, 2)
+            runner.perform_action(normalize_action(act),
+                                  metadata={"block": self.name, "src": "heal_trip"})
+        lead = read_lead(runner)
+        return bool(lead is not None and lead["max_hp"] and lead["hp"] == lead["max_hp"])
 
     def _fight(self, runner, rng, summary: dict, exp0: int) -> None:
         from collection.collect_behaviors import _battle_one
@@ -94,6 +159,7 @@ class GrindEvolve:
         rng = random.Random(self.seed)
         summary = dict(battles_won=0, levels_gained=0, evolved=False, final_level=0,
                        battles=0, ended="budget", skipped=[], frames=0)
+        ctx["summary"] = summary   # live reference: survives a budget-guard cut (W33)
         f0 = runner.frame_idx
         deadline = f0 + self.frames
         lead = read_lead(runner)
@@ -104,6 +170,11 @@ class GrindEvolve:
             return summary
         start_level, start_species = lead["level"], lead["species"]
         summary["final_level"] = start_level
+        if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
+            summary["skipped"].append(dict(reason=f"grass_map {self.grass_map} unreachable"))
+            summary["ended"] = "grass_map_unreachable"
+            summary["frames"] = runner.frame_idx - f0
+            return summary
         t, _, _ = nav._state(runner)
         g = nav.grass_goal(t, mk.behaviors(t)) if t is not None else None
         if g is None or not g.any():
@@ -120,9 +191,29 @@ class GrindEvolve:
             if lead["level"] >= self.target_level:
                 summary["ended"] = "target_level"
                 break
-            if lead["max_hp"] and lead["hp"] / lead["max_hp"] < self.hp_floor:
-                summary["ended"] = "lead_hp_low"     # spine heal logic owns recovery
-                break
+            frac = lead["hp"] / lead["max_hp"] if lead["max_hp"] else 1.0
+            if frac < self.hp_floor:
+                if self.heal_center and runner.nav_state().in_battle:
+                    # the previous fight can leave a live battle behind (PP-starved
+                    # driver + bounded await): the heal trip must start overworld
+                    from collection.playthrough.blocks.base import flee_battle
+                    flee_battle(runner)
+                # ONE bounded heal attempt (25k cap — a failed cross-map trip burned
+                # 117k measured); failure is NOT fatal above the hard floor: keep
+                # grinding low — a whiteout self-heals at the Center by game rules.
+                if (self.heal_center and summary.get("heals", 0) < self.max_heals
+                        and not summary.get("heal_failed")
+                        and self._heal_at_center(runner, mk,
+                                                 min(deadline, runner.frame_idx + 25_000))):
+                    summary["heals"] = summary.get("heals", 0) + 1
+                    if self.grass_map and not self._goto_map_safe(runner, mk, self.grass_map, deadline):
+                        summary["ended"] = "grass_map_unreachable"
+                        break
+                    continue                         # fresh HP+PP: keep grinding
+                summary["heal_failed"] = True
+                if frac < 0.12:                      # hard floor: genuinely faint-risk
+                    summary["ended"] = "lead_hp_low"
+                    break
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
             if r == "arrived":
                 r = nav.pace_grass(runner, mk, rng,
