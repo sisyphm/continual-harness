@@ -134,6 +134,33 @@ def flee_battle(runner, max_actions: int = 40) -> bool:
     return not runner.nav_state().in_battle
 
 
+def force_fight(runner, max_rounds: int = 500) -> bool:
+    """Resolve a battle by driving the menus straight from RAM. True iff we got out.
+
+    The heatz battle machine cannot be trusted here (measured on five wedged runs):
+    its party reader throws on some in-battle states ("8650 is not a valid Move")
+    while our own decrypt reads the same mon fine, so it never commits a move and the
+    run sits at the move menu forever. Worse, the cursor often rests on RUN, and RUN
+    is refused outright in a trainer battle — mashing A alone re-runs that refusal.
+
+    Each round steers UP+LEFT (FIGHT in the main menu, the first move in the move
+    menu) and then presses A, which also advances battle text. That is enough to play
+    a battle to its end, win or faint — and a faint whites us out to a Center with a
+    full heal, which the grind block already treats as its heal."""
+    for _ in range(max_rounds):
+        if not runner.nav_state().in_battle:
+            return True
+        for b in ("UP", "LEFT", "A"):
+            _nav()._hold(runner, [b], 3, "battle_fix")
+            _nav()._hold(runner, [], 10, "battle_fix")
+    return not runner.nav_state().in_battle
+
+
+def _nav():
+    from collection import navigator as nav
+    return nav
+
+
 def leave_battle(runner) -> None:
     """Get out of whatever battle we are in, by ANY legal means.
 

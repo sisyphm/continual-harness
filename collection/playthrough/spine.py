@@ -86,6 +86,8 @@ def run_milestone(
     last_blocked_nav_key = None
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
+    battle_stall = 0                      # consecutive in-battle iterations with no frames
+    last_frame_seen = runner.frame_idx
 
     # Already complete on entry (common in continuous mode: handoff lands us past the gate).
     if (
@@ -101,6 +103,33 @@ def run_milestone(
         if max_wall_s and time.monotonic() - t_start > max_wall_s:
             failure_reason = "wall_time_exceeded"
             break
+        # BATTLE WEDGE BREAKER (W33, measured on five runs at once). A TRAINER battle
+        # the policy tries to RUN from deadlocks: RUN is refused, the party read fails
+        # ("8650 is not a valid Move"), so the policy stops seeing a battle and paths
+        # instead — printing "No progress possible toward (x, y)" forever while
+        # stepping ZERO frames, which no action or wall budget can catch because
+        # neither advances. Route 116, the leg-2 grind map, is thick with trainer
+        # sight lines, so this stalled every run that reached it. Only fires on a
+        # PROVEN stall (in battle, frame counter frozen across iterations), so a
+        # healthy battle keeps whatever the policy was doing.
+        if runner.nav_state().in_battle:
+            battle_stall = battle_stall + 1 if runner.frame_idx == last_frame_seen else 0
+            if battle_stall >= 8:
+                from collection.playthrough.blocks.base import force_fight
+                from collection.playthrough.blocks.grind_evolve import await_overworld
+                if force_fight(runner):
+                    await_overworld(runner, phase="spine")
+                    battle_stall = 0
+                else:
+                    # Could not play the battle out either. NEVER spin: fail the
+                    # milestone so the attempt/retry machinery takes over — a run that
+                    # dies in 30 seconds and is re-run beats one that burns a worker
+                    # for 40 minutes and fails anyway.
+                    failure_reason = "battle_wedge_unrecoverable"
+                    break
+        else:
+            battle_stall = 0
+        last_frame_seen = runner.frame_idx
         if tic_fn is not None:
             tic_fn()
         policy_source = "heatz"
