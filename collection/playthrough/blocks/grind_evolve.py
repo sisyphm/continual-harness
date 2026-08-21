@@ -192,11 +192,18 @@ class GrindEvolve:
         # with force_fight sitting uselessly on the next line. force_fight steers
         # UP+LEFT to FIGHT / first move then A, which plays a wild battle out fine and
         # cannot get stuck on the RUN entry.
-        from collection.playthrough.blocks.base import force_fight
-        force_fight(runner)
-        if runner.nav_state().in_battle:            # last resort: the old machine
-            from collection.collect_behaviors import _battle_one
-            _battle_one(runner, rng, "fight")
+        # FAST PATH FIRST. Measured: the heatz machine resolves a wild battle in ~1,476
+        # ticks, force_fight takes ~18,618 — 12x slower — because it drives menus
+        # blindly instead of reading the battle. Making force_fight primary (to dodge
+        # trainer deadlocks) cost the grind its throughput: 3 battles per chunk
+        # instead of 35, so runs stalled at L14 having fought almost nothing.
+        # Use the fast machine, and keep force_fight for exactly what it is good at:
+        # a battle the machine could not finish.
+        from collection.collect_behaviors import _battle_one
+        _battle_one(runner, rng, "fight")
+        if runner.nav_state().in_battle:
+            from collection.playthrough.blocks.base import force_fight
+            force_fight(runner)
         await_overworld(runner, phase=self.phase)
         # Only clear dialogs once the overworld cb2 is genuinely back: _clear_dialog
         # mixes a B press every third input, and B CANCELS an evolution in progress —
