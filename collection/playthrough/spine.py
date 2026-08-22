@@ -234,7 +234,25 @@ def run_milestone(
             # while the frame counter never moved, so no action or wall budget applied.
             # Fail the milestone instead of spinning; retry/re-run is always cheaper.
             nav_stall = nav_stall + 1 if runner.frame_idx == last_frame_seen else 0
-            if nav_stall >= 200:
+            # An OFF-MAP goal spins WITH frames. The zero-frame test above only catches
+            # a walk that has stopped dead; pathing to a negative coordinate keeps
+            # burning frames inside goto while going nowhere, so nav_stall reset every
+            # iteration and this whole recovery was never reached. Measured today:
+            # exp_001 and exp_004 both finished the grind (L16, evolved, 46/48 wins)
+            # and then spun on goal (16,-1) printing "No progress possible" until the
+            # watchdog killed them at 226k and 200k frames -- the two most advanced
+            # runs of the wave. Position, not frames, is the honest progress signal
+            # here, and it is restricted to the off-map case so the in-map gym
+            # recoveries further down keep their turn.
+            _goal_off = False
+            try:
+                _gx0 = getattr(expected_state, "x", None)
+                _gy0 = getattr(expected_state, "y", None)
+                _goal_off = (_gx0 is not None and _gy0 is not None
+                             and (_gx0 < 0 or _gy0 < 0))
+            except Exception:
+                pass
+            if nav_stall >= 200 or (_goal_off and _stuck_pos >= 200):
                 # WRONG-MAP GOAL. The policy paths the NEXT map's coordinates
                 # against the CURRENT map's grid, so the goal lands OUTSIDE the map
                 # and no route can reach it. Measured: exp_008_treecko stood in
