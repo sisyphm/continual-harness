@@ -378,15 +378,29 @@ class GrindEvolve:
                 break
             frac = lead["hp"] / lead["max_hp"] if lead["max_hp"] else 1.0
             if frac < self.hp_floor:
-                # NO heal trip from here. Every measured attempt that started inside
-                # the grass failed and burned 25-117k frames: Route 104's crossing is
-                # a dialog trap for a one-mon party, and the Route 116 walk draws wild
-                # battles and trainer sight lines. The game already has a free, always
-                # available heal — faint. A whiteout teleports us to the Center with
-                # HP and PP fully restored, the loop head walks back to the grass, and
-                # the grind continues. It costs money we never spend, and a whiteout is
-                # authentic play that the corpus should contain anyway.
+                # RIDING THE FAINT COSTS THE RUN THE MAP. The old comment below argued a
+                # whiteout is a free heal that simply returns us to the grass. Measured
+                # on exp_016_torchic, it does not: the whiteout respawns at a Centre,
+                # the walk back lands in Route 104's SOUTH half, and the anchor (10,30)
+                # is in the NORTH half — two regions of one map id ('0,19') joined only
+                # through Petalburg Woods. The block recorded exactly that:
+                #   low_hp_laps: 10, returned: False, anchor_pos_return: stuck
+                # and ended at (27,54), from which RUSTBORO_CITY is unreachable. Every
+                # run that got this far died there (8 of 8 in the frozen-build wave).
+                # So take the Centre trip when one is configured. The earlier objection
+                # (heal trips from inside the grass burn 25-117k frames) was measured
+                # before the Centre walk worked; the Route 103 prep now does exactly
+                # this trip reliably. Bounded by max_heals so a failing trip cannot
+                # loop, and it falls through to the old faint behaviour when no Centre
+                # is configured, which keeps every other leg byte-identical.
                 summary["low_hp_laps"] = summary.get("low_hp_laps", 0) + 1
+                if self.heal_center and summary.get("heals", 0) < self.max_heals:
+                    _hcap = min(deadline, runner.frame_idx + 60_000)
+                    if self._heal_at_center(runner, mk, _hcap):
+                        summary["heals"] = summary.get("heals", 0) + 1
+                        summary["mid_grind_heals"] = summary.get("mid_grind_heals", 0) + 1
+                    else:
+                        summary["heal_trip_failed"] = summary.get("heal_trip_failed", 0) + 1
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
             _where = "goto_grass"
             if r == "arrived":
