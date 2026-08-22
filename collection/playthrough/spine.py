@@ -28,6 +28,73 @@ import collection.collect_events as ce
 _SPECIAL_UI_TIMING = ActionTiming(hold_frames=12, release_frames=48)
 
 
+def _battle_protected(runner, rounds: int = 160) -> None:
+    """Play a battle out while REFUSING to trade Double Kick away.
+
+    Steering (UP+LEFT+A) is the only cycle that actually selects a move, but the same
+    UP+LEFT walks the "make room for PECK?" cursor onto Double Kick and the following A
+    confirms the delete. Combusken learns Peck at L17, i.e. exactly in the middle of the
+    Rustboro gym run, so a torchic reached Roxanne holding [64,45,116,52] -- Peck, not
+    Double Kick -- and could not scratch her rock types. Peck/Ember are both resisted;
+    Double Kick is the win condition.
+
+    So watch the level between rounds: the moment it ticks up, answer with B (which
+    declines the swap) before resuming the steer.
+    """
+    from collection import navigator as _nav
+    from collection.extractors.ram import GBAState as _GS
+    from collection.extractors.ledger_panel import _battle_mon as _bm
+
+    def _rl(_r):
+        # Read the BATTLE structure, not the party. read_lead decrypts the party mon
+        # and throws mid-battle on some states ("... is not a valid Move"), returning
+        # None at exactly the level-up we are watching for -- so every guard built on
+        # it silently skipped and Peck ate Double Kick regardless.
+        try:
+            return _bm(_GS(env=_r.env), 0)
+        except Exception:
+            return None
+
+    _KEEP = 24                                   # Double Kick
+    _lv = (_rl(runner) or {}).get("level")
+    _seq = ("UP", "LEFT", "A")
+    _i = 0
+    for _ in range(rounds * 3):
+        if not runner.nav_state().in_battle:
+            return
+        # Poll before EVERY action, not once per three-action round: the level-up and
+        # its prompt both land inside a single round, so a coarser check confirmed the
+        # swap before it ever noticed. The mon goes in holding [24,45,116,52] and came
+        # out holding [64,...] with a per-round check.
+        _cur = _rl(runner)
+        if _cur and _lv and _cur.get("level", 0) > _lv:
+            # Declining takes TWO answers, not a B-mash: Emerald asks "Delete a move to
+            # make room for PECK?" (B = No) and then "Give up on learning PECK?"
+            # (A = Yes). Mashing B alone just bounces between the two boxes until the
+            # steer resumes and its A confirms the delete -- which is why the lead kept
+            # arriving at Roxanne holding Peck.
+            # Don't fight the prompt -- REDIRECT it. Declining takes two correctly
+            # timed answers ("delete a move?" No, then "give up learning?" Yes) and
+            # every variant of that still lost the move. Accepting is deterministic:
+            # say yes, then walk the forget-cursor DOWN off slot 0 (Double Kick) onto
+            # slot 1 (Growl) and confirm. Peck replaces the junk move, Double Kick --
+            # the only thing that beats her rock types -- survives.
+            for _ in range(4):
+                if _KEEP not in set((_rl(runner) or {}).get("moves") or ()):
+                    break                        # already gone; stop burning frames
+                for _k in ("A", "DOWN", "A", "A"):
+                    runner.perform_action(_k)
+                    _nav._hold(runner, [], 40, "spine")
+                if not runner.nav_state().in_battle:
+                    break
+            _lv = _cur["level"]
+            _i = 0
+            continue
+        runner.perform_action(_seq[_i % 3])
+        _i += 1
+        _nav._hold(runner, [], 40, "spine")
+
+
 def run_milestone(
     runner,
     *,
@@ -94,6 +161,7 @@ def run_milestone(
                                           # because losing the fight it triggers must not
                                           # disable the only way to reach the trainer
     _adjacent_once = False                # blocked-goal pre-check, likewise
+    _adjacent_fired = 0                   # total firings, incl. ones that met a trainer
     _warped_tries = 0                     # wrong-map (door) search: up to 3 per attempt
     _wrongmap = 0                         # consecutive iterations spent on the WRONG map
     t_start_frames = runner.frame_idx
@@ -291,7 +359,17 @@ def run_milestone(
         # walk has visited four tiles or fewer for 200 iterations, and only when the
         # map NAME disagrees. Try this map's doors until the name matches, stepping
         # back out of any wrong building.
-        if (_stuck_pos or _wrongmap >= 600) and _warped_tries < 3 \
+        # A SCRIPTED CUTSCENE IS NOT A STALL. Through the opening the player stands
+        # still by design, so the position window latches _stuck_pos at 200 and the
+        # recoveries fire into a scene they must not touch -- which stopped the FIRST
+        # milestone from ever being solved. Cold runs then sat at 601 recorded frames,
+        # which misled me for hours: solve-then-record only writes frames once a
+        # milestone is solved, so 601 meant "nothing solved yet", not "frozen".
+        _cutscene = False
+        if _stuck_pos or _wrongmap >= 600:
+            from collection import navigator as _nav0
+            _cutscene = _nav0._dialog_open(runner)
+        if (_stuck_pos or _wrongmap >= 600) and not _cutscene and _warped_tries < 1 \
                 and expected_state is not None:
             _em = getattr(expected_state, "map", None)
             if _em and runner.nav_state().map != _em:
@@ -304,6 +382,15 @@ def run_milestone(
                     _key = f"{_t.map_group},{_t.map_num}"
                     for _wp in (_mk.warps.get(_key) or [])[:8]:
                         _r = _nav.goto_warp(runner, _mk, _wp["x"], _wp["y"], budget=6_000)
+                        # SETTLE THE SEAM before anyone reads coordinates. The map ID
+                        # flips before the coordinates re-base, so a read taken straight
+                        # after a warp returns the tile we came FROM: measured, standing
+                        # inside RUSTBORO CITY GYM (11x20) the position still read
+                        # (27,19), a city tile outside the interior entirely, and BFS
+                        # planning from that foreign frame reported "stuck" forever.
+                        # After settling it reads (5,19) and the walk to the leader
+                        # succeeds on the first try.
+                        _nav._settle_seam(runner, "spine")
                         if runner.nav_state().map == _em:
                             print(f"spine: stuck, entered {_em} via warp "
                                   f"({_wp['x']},{_wp['y']})", flush=True)
@@ -321,7 +408,9 @@ def run_milestone(
         # and then burned 2,039,665 frames over five attempts without ever starting the
         # fight. Adjacency is all a talk or sight trigger needs. Same stall gate as the
         # other recoveries, so it cannot fire speculatively.
-        if _stuck_pos and _adjacent_once < 3 and expected_state is not None:
+        if _stuck_pos and not _cutscene and _adjacent_once < 8 and _adjacent_fired < 20 \
+                and not runner.nav_state().in_battle \
+                and expected_state is not None:
             _em = getattr(expected_state, "map", None)
             _gx = getattr(expected_state, "x", None)
             _gy = getattr(expected_state, "y", None)
@@ -329,6 +418,7 @@ def run_milestone(
                     and runner.nav_state().map == _em:
                 import numpy as _np
                 from collection import navigator as _nav
+                _nav._settle_seam(runner, "spine")   # never plan from a stale frame
                 _t, _, _ = _nav._state(runner)
                 # NOTE: do NOT require the goal tile to read as unwalkable. NPCs are
                 # OBJECTS, not collision — Roxanne's square (5,3) reads perfectly
@@ -337,7 +427,15 @@ def run_milestone(
                 # own map is enough; targeting the tile AND its neighbours lets BFS
                 # settle for adjacency when the tile itself is occupied.
                 if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
-                    _adjacent_once += 1
+                    _adjacent_fired += 1
+                    # UN-LATCH THE STALL IMMEDIATELY. _stuck_pos stays true until the
+                    # position window refills, so leaving the reset to the END of this
+                    # block meant every following iteration re-entered it -- a 12k-frame
+                    # goto plus a 45-press talk loop per iteration -- and actions_taken
+                    # stopped advancing entirely. The run looked wedged at 601 recorded
+                    # frames while its frame counter kept climbing.
+                    _recent.clear()
+                    _stuck_pos = 0
 
                     def _goal(t, beh, gx=_gx, gy=_gy):
                         m = _np.zeros(t.grid.shape, bool)
@@ -351,6 +449,116 @@ def run_milestone(
                                    phase="spine")
                     print(f"spine: stuck, goal ({_gx},{_gy}) is an occupied tile on "
                           f"{_em}; walked adjacent -> {_r}", flush=True)
+                    if runner.nav_state().in_battle:
+                        # the gym's own trainers intercept on the way to the leader;
+                        # drive those too, or their level-up prompt eats Double Kick
+                        # before the leader fight ever begins
+                        _battle_protected(runner)
+                    # THEN TALK. Standing next to a gym leader accomplishes nothing --
+                    # she fights only when spoken to, and her pre-battle speech swallows
+                    # about 25 A presses before the battle starts. Measured: with 8
+                    # presses this looked exactly like "talking does not work" and the
+                    # walk wandered off to another adjacent tile forever; pressing
+                    # through it triggered the fight (foe Geodude L12, her lead) and the
+                    # run took the STONE BADGE -- the first badge any W33 run has won.
+                    if not runner.nav_state().in_battle:
+                        from collection.heatz_adapter import _npc_blocked_tiles
+                        # STAND ON THE GOAL TILE ITSELF. The leader is adjacent to the
+                        # expected tile, not to whichever of its neighbours BFS happened
+                        # to settle on -- arriving at (4,3) leaves Roxanne at (5,2) two
+                        # tiles away, so the talk below found nobody and the milestone
+                        # burned all 8000 actions "arriving" over and over.
+                        def _exact(t, beh, gx=_gx, gy=_gy):
+                            m = _np.zeros(t.grid.shape, bool)
+                            if 0 <= gy + 7 < m.shape[0] and 0 <= gx + 7 < m.shape[1]:
+                                m[gy + 7, gx + 7] = True
+                            return m & (((t.grid >> 10) & 3) == 0)
+
+                        _nav.goto(runner, _nav.MapKnowledge(), _exact, budget=6_000,
+                                  phase="spine")
+                        if runner.nav_state().in_battle:
+                            _recent.clear()
+                            _stuck_pos = 0
+                            continue
+                        _t3, _px, _py = _nav._state(runner)
+                        _near = [n for n in
+                                 _npc_blocked_tiles(runner.env, exclude_xy=(_px, _py))
+                                 if abs(n[0] - _px) + abs(n[1] - _py) == 1]
+                        print(f"spine: on ({_px},{_py}) goal ({_gx},{_gy}); "
+                              f"adjacent NPCs={_near}", flush=True)
+                        if _near:
+                            _nx, _ny = _near[0]
+                            _face = {(1, 0): "RIGHT", (-1, 0): "LEFT",
+                                     (0, 1): "DOWN", (0, -1): "UP"}.get(
+                                         (_nx - _px, _ny - _py))
+                            if _face:
+                                runner.perform_action(_face)
+                            for _ in range(45):
+                                runner.perform_action("A")
+                                # SPACE THE PRESSES. Her speech advances one box per
+                                # press only if the button is released and the box has
+                                # rendered: back-to-back presses are swallowed and look
+                                # exactly like "she will not fight". Measured, 30 idle
+                                # frames between presses is what turned this from
+                                # nothing into the badge.
+                                _nav._hold(runner, [], 30, "spine")
+                                if runner.nav_state().in_battle:
+                                    print(f"spine: talked to NPC at ({_nx},{_ny}) "
+                                          f"-> battle", flush=True)
+                                    # DRIVE IT OURSELVES. Handing the leader fight back
+                                    # to the policy lost it every time (whiteout, full
+                                    # HP, no badge, walk back, repeat), while the RAM
+                                    # driver -- FIGHT then move slot 0, which is Double
+                                    # Kick on an evolved torchic and super-effective on
+                                    # her rock types -- beat her Geodude L12 lead and
+                                    # took the STONE BADGE.
+                                    # STEER, don't use force_fight here: it switches to
+                                    # a B-ONLY cycle whenever the lead holds a keeper
+                                    # move (Double Kick), and B advances text without
+                                    # ever selecting a move -- fine for coasting through
+                                    # a wild battle on menu memory, useless against a
+                                    # gym leader. Measured: force_fight left the run at
+                                    # 34/53 with no badge. This is the exact cycle that
+                                    # beat her: FIGHT, first move, A, settle.
+                                    # Steering is the ONLY way to attack, but the very
+                                    # same UP+LEFT walks the "make room for PECK?" cursor
+                                    # onto Double Kick and the next A deletes it -- the
+                                    # run came out of this fight holding [64,45,116,52],
+                                    # Peck instead of Double Kick, which is why it could
+                                    # not beat rock types. Peck is learned at L17, so
+                                    # watch the level: the instant it ticks up, answer
+                                    # with B (declines the swap, keeps Double Kick) and
+                                    # only then resume steering.
+                                    _battle_protected(runner)
+                                    break
+                    # A walk that ended in a BATTLE is progress, not a failed attempt:
+                    # the gym's own trainers intercept on the way to the leader, and
+                    # each interception used to burn one of only three tries, so the
+                    # recovery was exhausted before the leader was ever reached.
+                    # Measured: the winning sequence needed three interceptions and
+                    # THEN an arrival, i.e. four rounds minimum.
+                    if not runner.nav_state().in_battle and _r != "battle":
+                        _adjacent_once += 1
+                    # Demand FRESH evidence before firing again. The stall window stays
+                    # full right after a recovery, so without this the walk re-fired on
+                    # every following iteration, started a battle it never let the policy
+                    # play, and tripped the battle-wedge detector in 12 seconds flat.
+                    _recent.clear()
+                    _stuck_pos = 0
+        # TAKE OVER ANY BATTLE FOUGHT WITH DOUBLE KICK IN HAND. The gym's trainers
+        # intercept during ordinary policy iterations, and the policy answers the L17
+        # "make room for PECK?" prompt with A -- deleting the only move that beats rock.
+        # Measured: the lead entered the gym holding [24,45,116,52] and reached Roxanne
+        # holding [64,45,116,52] every single time, losing a fight it should win.
+        # This fires only while the lead actually holds move 24, i.e. an evolved
+        # torchic; nothing else in the corpus can trigger it.
+        if runner.nav_state().in_battle:
+            from collection.playthrough.blocks.grind_evolve import read_lead as _rl2
+            _lead2 = _rl2(runner)
+            if _lead2 and 24 in set(_lead2.get("moves") or ()):
+                _battle_protected(runner, rounds=60)
+                actions_taken += 1
+                continue
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(
