@@ -262,7 +262,8 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     blocks: bool = False, expedition: list[dict] | None = None,
                     persona: dict | None = None, max_attempts: int = 5,
                     resume_state: str | None = None,
-                    resume_after: str | None = None) -> dict:
+                    resume_after: str | None = None,
+                    savestate_every: int = 4000) -> dict:
     """...
 
     RESUME (W33): `resume_state` is a savestate written by an earlier attempt and
@@ -297,8 +298,13 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
     aborted_milestone = None
     t_run = time.time()
     with recorder_cm as recorder:
+        # Fine-grained savestates so a wedge can be resumed from just before it rather
+        # than from the last block boundary. They are nearly free: a whole run's
+        # savestates were 2.4 MB of a 1.3 GB run (0.2%) at the 4000-frame default, so
+        # even an 8x tighter cadence stays under half a percent of the recording.
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=None,
-                                      recorder=recorder if record else None)
+                                      recorder=recorder if record else None,
+                                      savestate_every=savestate_every)
         runner.initialize()
         if record:
             # W33 §14.4 persona plumbing: the persona is a first-class manifest field

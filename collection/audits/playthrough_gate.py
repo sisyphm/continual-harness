@@ -72,6 +72,43 @@ def stone_badge(st: GBAState) -> tuple[bool, int]:
     return stone, count
 
 
+PARTY_BASE = 0x020244EC
+PARTY_COUNT = 0x020244E9
+_CHARMAP = {**{0xBB + i: chr(ord("A") + i) for i in range(26)},
+            **{0xD5 + i: chr(ord("a") + i) for i in range(26)},
+            0x00: " "}
+# The starter lines. A party mon whose stored name is one of these was never
+# nicknamed; anything else (the v2 corpus was full of "AAAAAAAAAA") was.
+_SPECIES_NAMES = {"MUDKIP", "MARSHTOMP", "SWAMPERT",
+                  "TORCHIC", "COMBUSKEN", "BLAZIKEN",
+                  "TREECKO", "GROVYLE", "SCEPTILE"}
+
+
+def party_fidelity(st: GBAState) -> tuple[int, list[str], list[str]]:
+    """(party_count, stored_names, reasons) — the corpus entity-fidelity invariants.
+
+    Both failures were live in the v2 corpus and both are silent in the collector log,
+    which is why they are checked HERE, against the recording:
+      * every run's starter was renamed AAAAAAAAAA (Birch's nickname offer, blanket-
+        confirmed by the policy);
+      * two runs finished holding a wild Pokemon (an A-mash landed on BAG and threw a
+        Poke Ball), which also deadlocked one run on the switch screen.
+    """
+    reasons: list[str] = []
+    n = st.bytes(PARTY_COUNT, 1)[0]
+    names: list[str] = []
+    for slot in range(min(n, 6)):
+        raw = st.bytes(PARTY_BASE + slot * 100 + 8, 10)
+        nm = "".join(_CHARMAP.get(b, "") for b in raw).strip()
+        names.append(nm)
+    if n != 1:
+        reasons.append(f"party holds {n} pokemon, expected exactly 1 (caught/received one?)")
+    for nm in names:
+        if nm.upper() not in _SPECIES_NAMES:
+            reasons.append(f"party member named {nm!r} — nicknamed, or an unexpected species")
+    return n, names, reasons
+
+
 def count_lines(p: Path) -> int:
     n = 0
     with open(p, "rb") as f:
@@ -95,6 +132,12 @@ def gate_run(run_dir: Path) -> dict:
         r["badge_count"] = badges
         if not stone:
             r["reasons"].append("stone badge flag NOT set in final state")
+
+        # 1b. entity fidelity: exactly one pokemon, and it kept its species name
+        n_party, party_names, party_reasons = party_fidelity(st)
+        r["party_count"] = n_party
+        r["party_names"] = party_names
+        r["reasons"].extend(party_reasons)
 
         # 2. integrity
         idx = json.loads((run_dir / "ppu_state.bin.idx.json").read_text())

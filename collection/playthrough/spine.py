@@ -27,6 +27,170 @@ import collection.collect_events as ce
 # a global slowdown.
 _SPECIAL_UI_TIMING = ActionTiming(hold_frames=12, release_frames=48)
 
+# Oldale Town's Pokemon Center 1F. Identified by map dimensions (14x9), which match
+# the two Centre keys already known to the collector — Petalburg 8,4 and Rustboro 11,5
+# — rather than assumed from the group numbering.
+_OLDALE_CENTER = "2,2"
+_RIVAL_MIN_LEVEL = 6
+
+
+def _rival_prep_phase(runner) -> str:
+    """'grind' | 'heal' | 'engage' — how ready the lead is to fight the Route 103 rival.
+
+    Owner's rule, from playing it: at level >= 6 on FULL HP the starter wins by pressing
+    the first move, whichever starter it is. So the run has to arrive at the rival both
+    levelled AND healed. It previously arrived at neither, because the stuck-recovery
+    walks up and talks to May the moment the walk to her tile is refused — and her tile
+    is refused by definition, she is standing on it. That started the fight at L6 on
+    16/23 HP, lost it, and whited the run out (13 of the final wave's 17).
+    """
+    from collection.playthrough.blocks.grind_evolve import read_lead
+    try:
+        lead = read_lead(runner)
+        if not lead or not lead.get("max_hp"):
+            return "engage"                       # unreadable: don't block the milestone
+        if int(lead.get("level") or 0) < _RIVAL_MIN_LEVEL:
+            return "grind"
+        return "engage" if lead["hp"] >= lead["max_hp"] else "heal"
+    except Exception:
+        return "engage"
+
+
+def _heal_at_oldale(runner) -> bool:
+    """Full-restore at the Oldale Centre nurse. The owner's requirement is explicit:
+    use the Centre — never the faint-as-heal shortcut, which is what strands a run."""
+    from collection import navigator as _nav
+    from collection.playthrough.blocks.grind_evolve import GrindEvolve
+    try:
+        blk = GrindEvolve(target_level=_RIVAL_MIN_LEVEL, heal_center=_OLDALE_CENTER)
+        ok = blk._heal_at_center(runner, _nav.MapKnowledge(),
+                                 runner.frame_idx + 60_000)
+        print(f"spine: rival prep — Oldale Centre heal -> {ok}", flush=True)
+        return bool(ok)
+    except Exception as e:
+        print(f"spine: rival prep — heal failed: {e!r}", flush=True)
+        return False
+
+
+def _walk_to_expected_tile(runner, expected_state) -> None:
+    """Walk to the milestone's expected tile (or a neighbour) with our own navigator."""
+    import numpy as _np
+    from collection import navigator as _nav
+    gx = getattr(expected_state, "x", None)
+    gy = getattr(expected_state, "y", None)
+    if gx is None or gy is None:
+        return
+    t, _, _ = _nav._state(runner)
+    if t is None or not (0 <= gx < t.map_width and 0 <= gy < t.map_height):
+        return
+
+    def _goal(t, beh, gx=int(gx), gy=int(gy)):
+        m = _np.zeros(t.grid.shape, bool)
+        for dx, dy in ((0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)):
+            yy, xx = gy + dy + 7, gx + dx + 7
+            if 0 <= yy < m.shape[0] and 0 <= xx < m.shape[1]:
+                m[yy, xx] = True
+        return m & (((t.grid >> 10) & 3) == 0)
+
+    r = _nav.goto(runner, _nav.MapKnowledge(), _goal, budget=25_000, phase="spine")
+    print(f"spine: re-anchor tile ({gx},{gy}) -> {r}", flush=True)
+
+
+def _reanchor_to_expected(runner, expected_state) -> bool:
+    """Walk back to the milestone's own map after a whiteout dumped us elsewhere.
+
+    Losing the Route 103 rival battle whites the run out to the player's bedroom in
+    Littleroot, three maps from where the milestone expects to be — and the milestone
+    still reports `passed`, because its postcondition is a story flag, not a win. The
+    NEXT milestone then starts stranded: BACK_TO_OLDALE_FROM_ROUTE103's policy is
+    `return 'down'`, so it walks into the bedroom wall while the emulator BFS spins on
+    a blocked in-house tile. That is 13 of the final wave's 17 failures.
+
+    Losing is legal Emerald and the story continues, so the run does not need to be
+    abandoned — it only needs to get back on the map. Cross maps with our own
+    navigator, which reads collision from RAM and handles warps and connections,
+    instead of the policy's flat coordinate pathing.
+    """
+    from collection import navigator as _nav
+    em = getattr(expected_state, "map", None) if expected_state is not None else None
+    if not em or runner.nav_state().map == em:
+        return False
+    try:
+        import json
+        from pathlib import Path
+        keys = json.loads((Path(__file__).resolve().parents[1]
+                           / "map_name_keys.json").read_text())
+        dst = keys.get(str(em).upper())
+        if not dst:
+            return False
+        # The walk home crosses two routes of tall grass, so it WILL be interrupted;
+        # goto_map returns "battle" partway and one attempt only gets us halfway
+        # (measured: bedroom -> ROUTE 101 (13,13), still a map short of Oldale).
+        # Resolve each interruption and carry on. Travelling, not grinding: flee every
+        # wild battle regardless of HP, and only play out the ones we cannot flee.
+        for _ in range(4):
+            r = _nav.goto_map(runner, _nav.MapKnowledge(), dst)
+            print(f"spine: re-anchor -> {em} ({dst}): {r}", flush=True)
+            if r == "arrived" or runner.nav_state().map == em:
+                break
+            if r != "battle":
+                break
+            if not _flee_wild_if_critical(runner, floor=1.01):
+                _battle_protected(runner, rounds=60)
+        if runner.nav_state().map != em:
+            return False
+        # Landing on the map is not enough. Coming home the long way enters Oldale from
+        # the SOUTH (measured: (11,19)), while BACK_TO_OLDALE_FROM_ROUTE103 expects the
+        # NORTH entrance (10,1) — and that policy returns 'no_op' the moment it reads
+        # OLDALE TOWN, so nothing walks the rest. Put the run on the tile the milestone
+        # expects; adjacency is enough for anything that triggers on contact.
+        _walk_to_expected_tile(runner, expected_state)
+        return True
+    except Exception as e:
+        print(f"spine: re-anchor failed: {e!r}", flush=True)
+        return False
+
+
+def _flee_wild_if_critical(runner, floor: float = 0.30) -> bool:
+    """Run from a WILD battle whose lead is under `floor` HP. True if the battle ended.
+
+    grind_evolve deliberately treats fainting as a free heal ("a whiteout teleports us
+    to the Center with HP and PP fully restored") and that is fine INSIDE the grind
+    block, which walks itself back to the grass afterwards. Under a story milestone it
+    is fatal: the whiteout respawn is the player's own bedroom in Littleroot, three maps
+    from wherever the milestone expects to be, and the milestone policy has no idea it
+    moved — BACK_TO_OLDALE_FROM_ROUTE103's policy is literally `return 'down'`. That is
+    how 13 of the final wave's 17 runs died after the Route 103 rival battle.
+
+    So keep the faint-as-heal trick, but not here: a story milestone flees instead.
+    Wild only — RUN is refused in a trainer battle, and mashing it there would just
+    walk the action cursor onto the wrong menu entry.
+    """
+    from collection import navigator as _nav
+    from collection.extractors.ledger_panel import _battle_mon
+    from collection.extractors.ram import GBAState
+    from collection.heatz_adapter import _is_trainer_battle
+    try:
+        if _is_trainer_battle(runner.env):
+            return False
+        mon = _battle_mon(GBAState(env=runner.env), 0)
+        if not mon or not mon.get("max_hp"):
+            return False
+        if mon["hp"] / mon["max_hp"] >= floor:
+            return False
+    except Exception:
+        return False                                  # unreadable -> leave it alone
+    for _ in range(6):                                # "Couldn't escape!" is possible
+        if not runner.nav_state().in_battle:
+            return True
+        # Home the cursor on FIGHT first (LEFT+UP), THEN walk it to RUN at bottom-right:
+        # the cursor keeps wherever a previous press left it, so a bare RIGHT+DOWN lands
+        # somewhere different every time.
+        for _k in ("LEFT", "UP", "RIGHT", "DOWN", "A"):
+            runner.perform_action(_k, metadata={"src": "flee_critical"})
+        _nav._hold(runner, [], 30, "spine")
+    return not runner.nav_state().in_battle
+
 
 def _battle_protected(runner, rounds: int = 160) -> None:
     """Play a battle out while REFUSING to trade Double Kick away.
@@ -154,6 +318,8 @@ def run_milestone(
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map recovery fires at most once per attempt
+    _reanchored = False                   # whiteout re-anchor also fires at most once
+    _rival_ready = False                  # levelled AND healed for the Route 103 rival
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
@@ -182,6 +348,31 @@ def run_milestone(
     for _ in range(max_actions):
         if max_wall_s and time.monotonic() - t_start > max_wall_s:
             failure_reason = "wall_time_exceeded"
+            break
+        # FRAME-RATE COLLAPSE = wedged. A healthy milestone steps thousands of frames
+        # per second; a wedged one crawls, because every iteration replans a route it
+        # can never walk and the emulator barely advances. Measured on the final wave:
+        # 846 frames in 240 s (~3.5 fps) after a whiteout teleported the run into its
+        # own bedroom, three maps from the goal — the policy then pathed to a blocked
+        # tile in the house forever. Neither existing recovery applies (frames DO tick,
+        # so the zero-frame test resets; the goal IS in bounds, so the off-map test is
+        # false), and at this speed the 200-sample position windows never even fill
+        # before the wall budget expires. That cost 13 of the wave's 17 failures a full
+        # 240 s each. Fail at a quarter of it: the retry machinery re-runs the milestone
+        # from a clean state, which is always cheaper than spinning.
+        if (time.monotonic() - t_start > 60.0
+                and runner.frame_idx - start_frame < 2000):
+            # Displaced (whiteout) rather than merely stuck? Walk back onto the
+            # milestone's map ONCE and give it a fresh budget, then fail if it is
+            # still crawling — a run that recovers is worth far more than one that
+            # dies correctly.
+            if not _reanchored and _reanchor_to_expected(runner, expected_state):
+                _reanchored = True
+                t_start = time.monotonic()
+                start_frame = runner.frame_idx
+                _recent.clear()
+                continue
+            failure_reason = "nav_wedge_frame_rate_collapse"
             break
         # BATTLE WEDGE BREAKER (W33, measured on five runs at once). A TRAINER battle
         # the policy tries to RUN from deadlocks: RUN is refused, the party read fails
@@ -457,6 +648,23 @@ def run_milestone(
                 # never true and this recovery never ran. Being stalled on the goal's
                 # own map is enough; targeting the tile AND its neighbours lets BFS
                 # settle for adjacency when the tile itself is occupied.
+                # Never START the rival fight under-prepared. This recovery exists to
+                # reach a goal tile an NPC is standing on, and for MAY_ROUTE103 that NPC
+                # IS the fight — so walking up and talking here skips the grind the
+                # milestone is built around. Hold it back until level >= 6 and full HP.
+                if (event_id == "MAY_ROUTE103_INTERACTION"
+                        and _rival_prep_phase(runner) != "engage"):
+                    _recent.clear()
+                    _stuck_pos = 0
+                    _prep = _rival_prep_phase(runner)
+                    if _prep == "heal" and _heal_at_oldale(runner):
+                        # The nurse leaves us standing INSIDE the Centre, and the
+                        # milestone policy only knows how to path on Route 103 — from
+                        # in here it paths to (10,4) against the Centre's own grid and
+                        # wedges. Walk back out to the rival's tile ourselves; the wild
+                        # draws on the way are fled now that _rival_ready has latched.
+                        _reanchor_to_expected(runner, expected_state)
+                    continue
                 if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
                     _adjacent_fired += 1
                     # UN-LATCH THE STALL IMMEDIATELY. _stuck_pos stays true until the
@@ -584,12 +792,27 @@ def run_milestone(
         # This fires only while the lead actually holds move 24, i.e. an evolved
         # torchic; nothing else in the corpus can trigger it.
         if runner.nav_state().in_battle:
+            # Approaching the Route 103 rival: flee EVERY wild draw, whatever our HP.
+            # The whole point of the Centre trip is to reach May on full HP, and one
+            # Wingull on the walk over undoes it (the grass runs right up to her).
+            # Only once we are levelled and healed — before that the wild battles ARE
+            # the grind, so they are fought normally under the low-HP guard below.
+            if (event_id == "MAY_ROUTE103_INTERACTION" and _rival_ready
+                    and _flee_wild_if_critical(runner, floor=1.01)):
+                actions_taken += 1
+                continue
+            # Never faint under a story milestone (see _flee_wild_if_critical).
+            if _flee_wild_if_critical(runner):
+                actions_taken += 1
+                continue
             from collection.playthrough.blocks.grind_evolve import read_lead as _rl2
             _lead2 = _rl2(runner)
             if _lead2 and 24 in set(_lead2.get("moves") or ()):
                 _battle_protected(runner, rounds=60)
                 actions_taken += 1
                 continue
+        if event_id == "MAY_ROUTE103_INTERACTION" and not runner.nav_state().in_battle:
+            _rival_ready = _rival_prep_phase(runner) == "engage"
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(

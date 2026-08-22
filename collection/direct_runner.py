@@ -9,6 +9,8 @@ from typing import Any
 
 import numpy as np
 
+from collection.catch_guard import ball_throw_blocked
+from collection.nickname_guard import nickname_prompt_open
 from collection.actions import ActionTiming, PaceProbe, paced_action_frames, run_action_frames, update_facing
 from collection.recorder import ChunkRecorder
 from collection.state import AbstractState, control_mode, location_name, read_compact_state, safe_call
@@ -241,6 +243,15 @@ class DirectEmulatorRunner:
         metadata: dict[str, Any] | None = None,
         record_end_state: bool = True,
     ) -> AbstractState | None:
+        # Refuse nickname offers wherever the press comes from. This has to sit at the
+        # one choke point every action passes through: the A presses that accepted them
+        # came from several different mashing loops (policy confirm, walk-and-talk NPC
+        # recovery, dialog-release, unstick), and gating them one at a time leaves the
+        # next one to rediscover the bug. See collection/nickname_guard.py.
+        if str(action).upper() == "A" and (
+                nickname_prompt_open(self.env) or ball_throw_blocked(self)):
+            action = "B"
+
         self.facing = update_facing(self.facing, action)
         if timing is not None:
             # Explicit fixed schedule: bit-identical to the pre-W33 behavior for any

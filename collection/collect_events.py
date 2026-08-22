@@ -351,7 +351,19 @@ def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunn
 # Events whose completion is decided ONLY by _semantic_postcondition_met (their stored
 # milestone/checkpoint is unreliable, so we must not fall through to the sticky-flag
 # milestone check, which would pass prematurely).
-_SEMANTIC_ONLY_EVENTS = {"ROUTE_104_SOUTH", "TRAINER_JOSH_BATTLE"}
+_SEMANTIC_ONLY_EVENTS = {"ROUTE_104_SOUTH", "TRAINER_JOSH_BATTLE",
+                         # MAY_ROUTE103_INTERACTION is the rival FIGHT, and the position
+                         # fallback cannot tell "beat May" from "standing next to May".
+                         # It accepted both, in two opposite ways: the run that LOST was
+                         # stamped passed while it sat on (10,4) at 0 HP mid-whiteout
+                         # (money 3000 -> 1500, lead L6, never re-fought — 13 of the
+                         # final wave's 17), and once the prep gate stopped that early
+                         # fight, a healthy run was stamped passed for merely walking
+                         # adjacent, never fighting at all (measured: money still 3000).
+                         # The semantic check is the only honest one here: prize money
+                         # (>= 3300) is proof of a win, and a whiteout's halving can
+                         # never fake it.
+                         "MAY_ROUTE103_INTERACTION"}
 
 
 def _postcondition_met(
