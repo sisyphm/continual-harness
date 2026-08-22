@@ -465,12 +465,41 @@ class GrindEvolve:
         await_overworld(runner, budget=6000, phase=self.phase)
         if nav._dialog_open(runner):
             nav._clear_dialog(runner, self.phase)
-        # walk back to the anchor map ourselves so the XP survives (see above)
-        amap = (ctx.get("anchor") or (None,))[0]
+        # WALK BACK TO THE ANCHOR TILE, not merely the anchor MAP. This block anchors at
+        # ("0,19", 10, 30) -- and (10,30) is the PETALBURG WOODS warp, the only way from
+        # Route 104's south half to its north half. The old code took anchor[0] and threw
+        # the coordinates away, so whenever the grind ended anywhere on Route 104 the map
+        # already matched, the walk-back did NOTHING, and the run was left wherever the
+        # grind wandered (measured: (22,57), deep in the south half).
+        # From there the spine is asked to reach RUSTBORO CITY, and BFS proves it cannot:
+        # 805 tiles reachable, not one on the north edge. The run oscillates at the wall
+        # ~7s per iteration until the watchdog kills it. That is the stall that took a
+        # dozen runs at 41-42 milestones.
+        # Corroboration: of 30 runs that ever COMPLETED, 28 ran no grind block at all.
+        # Runs that grind are the runs that die.
+        _anchor = ctx.get("anchor") or (None, None, None)
+        amap = _anchor[0]
+        ax, ay = (_anchor[1], _anchor[2]) if len(_anchor) >= 3 else (None, None)
         if amap:
             t_end, _, _ = nav._state(runner)
             cur = None if t_end is None else f"{t_end.map_group},{t_end.map_num}"
             if cur != amap and not self._goto_map_safe(runner, mk, amap, deadline):
                 summary["anchor_return_failed"] = True
+            elif ax is not None and ay is not None:
+                import numpy as _np
+
+                def _anchor_goal(t, beh, gx=int(ax), gy=int(ay)):
+                    m = _np.zeros(t.grid.shape, bool)
+                    if 0 <= gy + 7 < m.shape[0] and 0 <= gx + 7 < m.shape[1]:
+                        m[gy + 7, gx + 7] = True
+                    return m & (((t.grid >> 10) & 3) == 0)
+
+                _budget = max(0, min(deadline - runner.frame_idx, 25_000))
+                if _budget > 0:
+                    summary["anchor_pos_return"] = nav.goto(
+                        runner, mk, _anchor_goal, budget=_budget, phase=self.phase)
+                    _t2, _x2, _y2 = nav._state(runner)
+                    summary["anchor_pos_final"] = (
+                        None if _t2 is None else [int(_x2), int(_y2)])
         summary["frames"] = runner.frame_idx - f0
         return summary
