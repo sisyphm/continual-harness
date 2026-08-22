@@ -31,6 +31,7 @@ _SPECIAL_UI_TIMING = ActionTiming(hold_frames=12, release_frames=48)
 # the two Centre keys already known to the collector — Petalburg 8,4 and Rustboro 11,5
 # — rather than assumed from the group numbering.
 _OLDALE_CENTER = "2,2"
+_RUSTBORO_CENTER = "11,5"
 _RIVAL_MIN_LEVEL = 6
 
 
@@ -56,19 +57,19 @@ def _rival_prep_phase(runner) -> str:
         return "engage"
 
 
-def _heal_at_oldale(runner) -> bool:
-    """Full-restore at the Oldale Centre nurse. The owner's requirement is explicit:
-    use the Centre — never the faint-as-heal shortcut, which is what strands a run."""
+def _heal_at_centre(runner, centre_key: str) -> bool:
+    """Full-restore at a Centre nurse. The owner's requirement is explicit: use the
+    Centre — never the faint-as-heal shortcut, which is what strands a run."""
     from collection import navigator as _nav
     from collection.playthrough.blocks.grind_evolve import GrindEvolve
     try:
-        blk = GrindEvolve(target_level=_RIVAL_MIN_LEVEL, heal_center=_OLDALE_CENTER)
+        blk = GrindEvolve(target_level=_RIVAL_MIN_LEVEL, heal_center=centre_key)
         ok = blk._heal_at_center(runner, _nav.MapKnowledge(),
                                  runner.frame_idx + 60_000)
-        print(f"spine: rival prep — Oldale Centre heal -> {ok}", flush=True)
+        print(f"spine: Centre heal at {centre_key} -> {ok}", flush=True)
         return bool(ok)
     except Exception as e:
-        print(f"spine: rival prep — heal failed: {e!r}", flush=True)
+        print(f"spine: Centre heal failed: {e!r}", flush=True)
         return False
 
 
@@ -315,6 +316,23 @@ def run_milestone(
     last_structural_progress_key = ce._structural_progress_key(start_state)
     blocked_nav_count = 0
     last_blocked_nav_key = None
+
+    # NEVER ENTER THE LEADER FIGHT WITHOUT AMMUNITION. Roxanne cost three runs at
+    # 50/51 — the single most expensive place to fail, each having already burned
+    # 80-140 minutes. exp_028 walked in holding Scratch(pp0)/Ember(pp0) and could not
+    # select a damaging move at all, so its five attempts were lost before they began
+    # ("battle_wedge_unrecoverable"). The Rustboro Centre is a few tiles from the gym
+    # door and restores PP, so top up first rather than discover it mid-battle.
+    if event_id == "ROXANNE_BATTLE":
+        try:
+            from collection.move_data import out_of_ammo as _oa
+            from collection.playthrough.blocks.grind_evolve import read_lead as _rl0
+            if _oa(_rl0(runner)):
+                print("spine: gym gate — lead has no damaging PP, topping up first",
+                      flush=True)
+                _heal_at_centre(runner, _RUSTBORO_CENTER)
+        except Exception as _e:
+            print(f"spine: gym gate skipped: {_e!r}", flush=True)
 
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map recovery fires at most once per attempt
@@ -657,7 +675,7 @@ def run_milestone(
                     _recent.clear()
                     _stuck_pos = 0
                     _prep = _rival_prep_phase(runner)
-                    if _prep == "heal" and _heal_at_oldale(runner):
+                    if _prep == "heal" and _heal_at_centre(runner, _OLDALE_CENTER):
                         # The nurse leaves us standing INSIDE the Centre, and the
                         # milestone policy only knows how to path on Route 103 — from
                         # in here it paths to (10,4) against the Centre's own grid and

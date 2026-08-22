@@ -35,6 +35,7 @@ from __future__ import annotations
 import random
 
 from collection import navigator as nav
+from collection.move_data import out_of_ammo as _out_of_ammo
 from collection.extractors.ledger_panel import (
     CB2_ADDR, CB2_OVERWORLD, PARTY_ADDR, PARTY_COUNT_ADDR, decrypt_party_mon,
 )
@@ -377,7 +378,17 @@ class GrindEvolve:
                 summary["ended"] = "level_cap_no_evolution"   # honest, not silent
                 break
             frac = lead["hp"] / lead["max_hp"] if lead["max_hp"] else 1.0
-            if frac < self.hp_floor:
+            # OUT OF AMMUNITION IS ALSO A REASON TO HEAL, and the commoner one. The
+            # trigger below was HP-only, but a grind burns PP faster than HP: Torchic
+            # carries Scratch(35) + Ember(25) = 60 damaging turns and L11->L16 needs
+            # far more, so the lead runs dry while still healthy. Measured on the
+            # 2026-08-23 wave: 8 of 12 failures were PP, dying at 33-66% HP — one at
+            # 33%, three points above this floor. With no damaging move the battle
+            # driver reselects an empty slot forever ("There's no PP left for this
+            # move!"), which the watchdog sees as a battle deadlock. The nurse restores
+            # PP as well as HP, so the same Centre trip fixes both.
+            _dry = _out_of_ammo(lead)
+            if frac < self.hp_floor or _dry:
                 # RIDING THE FAINT COSTS THE RUN THE MAP. The old comment below argued a
                 # whiteout is a free heal that simply returns us to the grass. Measured
                 # on exp_016_torchic, it does not: the whiteout respawns at a Centre,
@@ -394,13 +405,30 @@ class GrindEvolve:
                 # loop, and it falls through to the old faint behaviour when no Centre
                 # is configured, which keeps every other leg byte-identical.
                 summary["low_hp_laps"] = summary.get("low_hp_laps", 0) + 1
-                if self.heal_center and summary.get("heals", 0) < self.max_heals:
+                # Cap ATTEMPTS, not successes. The first version counted only successful
+                # heals toward max_heals, so a trip that kept failing was never capped:
+                # exp_025 made six, and each half-finished walk left it further from the
+                # anchor until it ended in Route 104's south half — the very
+                # displacement this fix exists to prevent, arriving by another road.
+                _tries = summary.get("heal_attempts", 0)
+                if self.heal_center and _tries < self.max_heals:
+                    summary["heal_attempts"] = _tries + 1
                     _hcap = min(deadline, runner.frame_idx + 60_000)
                     if self._heal_at_center(runner, mk, _hcap):
                         summary["heals"] = summary.get("heals", 0) + 1
                         summary["mid_grind_heals"] = summary.get("mid_grind_heals", 0) + 1
                     else:
                         summary["heal_trip_failed"] = summary.get("heal_trip_failed", 0) + 1
+                        # Never leave the run wherever the failed walk stopped: get back
+                        # onto the grind's own map before the next lap.
+                        if self.grass_map:
+                            self._goto_map_safe(runner, mk, self.grass_map, deadline)
+                elif _dry and _tries >= self.max_heals:
+                    # No ammunition and no heals left: further laps cannot win a battle,
+                    # they can only deadlock one. End honestly so the retry machinery
+                    # re-runs the block instead of burning the whole frame budget.
+                    summary["ended"] = "out_of_pp"
+                    break
             r = nav.goto_grass(runner, mk, budget=deadline - runner.frame_idx)
             _where = "goto_grass"
             if r == "arrived":
