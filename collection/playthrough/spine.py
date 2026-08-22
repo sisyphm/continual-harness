@@ -201,8 +201,21 @@ def run_milestone(
             battle_stall += 1
             if battle_stall >= 240:
                 from collection.playthrough.blocks.base import force_fight
-                from collection.playthrough.blocks.grind_evolve import await_overworld
-                if force_fight(runner):
+                from collection.playthrough.blocks.grind_evolve import (
+                    await_overworld, read_lead as _rlk)
+                # force_fight goes B-ONLY the moment the lead holds a keeper move, and
+                # B never selects a move -- so on an evolved torchic this recovery could
+                # not resolve a battle at all and the milestone died
+                # "battle_wedge_unrecoverable". Measured directly: force_fight left that
+                # lead at 34/53 with no badge. Steer instead, with the level watch that
+                # keeps Double Kick, which is the cycle that beat Roxanne.
+                _lk = _rlk(runner)
+                if _lk and 24 in set(_lk.get("moves") or ()):
+                    _battle_protected(runner, rounds=120)
+                    _resolved = not runner.nav_state().in_battle
+                else:
+                    _resolved = force_fight(runner)
+                if _resolved:
                     await_overworld(runner, phase="spine")
                     battle_stall = 0
                 else:
