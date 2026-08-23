@@ -207,6 +207,7 @@ class ItemUse:
                 continue
             bag0 = self._potions(runner)
             hp0, _mx = _bmon_hp(_env(runner))
+            runner.allow_battle_bag = True                   # see collection/catch_guard.py
             _press(runner, "RIGHT", 20, p)                   # action cursor -> BAG
             _press(runner, "A", 40, p)
             if not _poll(runner, lambda st: st.u32(CB2_ADDR) == CB2_BAG, 600, p):

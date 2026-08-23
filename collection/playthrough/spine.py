@@ -132,7 +132,7 @@ def _reanchor_to_expected(runner, expected_state) -> bool:
         # (measured: bedroom -> ROUTE 101 (13,13), still a map short of Oldale).
         # Resolve each interruption and carry on. Travelling, not grinding: flee every
         # wild battle regardless of HP, and only play out the ones we cannot flee.
-        for _ in range(4):
+        for _ in range(8):
             r = _nav.goto_map(runner, _nav.MapKnowledge(), dst)
             print(f"spine: re-anchor -> {em} ({dst}): {r}", flush=True)
             if r == "arrived" or runner.nav_state().map == em:
@@ -270,6 +270,32 @@ def _press_best_move(runner) -> None:
         i = 0
     if i is None:
         i = 0                                    # nothing damaging: let the caller cope
+    # NO MENU GATE HERE. Tried gating the steer on "What will ... do?" being on screen,
+    # on the theory that firing the sequence at a text box desyncs the menus. It made
+    # things strictly worse: both gym fights that this selector had been winning
+    # regressed to nav_wedge_frame_rate_collapse with badges=0, because the dialog
+    # reader does not reliably show that prompt when the menu IS up, so the run just
+    # pressed A forever and never chose a move. The unconditional sequence wins; the
+    # stray presses land on text and are harmless.
+    # DO NOT REWRITE THIS SEQUENCE. Two attempts to make it "safer" both regressed the
+    # gym fights it was winning: gating it on the "What will ... do?" prompt (the text
+    # reader does not reliably show that while the menu IS up -> pressed A forever,
+    # badges=0 on both), and prefixing B presses (exp_031 went from a win to
+    # wall_time_exceeded). Stray presses landing on text are harmless; the sequence as
+    # written wins. Fix the ONE catastrophic outcome reactively instead, below.
+    #
+    # RUN-IN-A-TRAINER-BATTLE. If the opening A is eaten by a text box the following
+    # UP/LEFT walk the ACTION cursor and the closing A can confirm RUN, which a
+    # trainer battle refuses -- exp_019 spent a whole milestone reading "No! There's
+    # no running from a TRAINER battle!". That refusal is visible, so react to it:
+    # walk the cursor off RUN before steering again.
+    try:
+        from collection.heatz_adapter import _read_dialog_text
+        if "no running" in (_read_dialog_text(runner.env) or "").lower():
+            for _k in ("UP", "LEFT"):
+                runner.perform_action(_k, metadata={"src": "unstick_run"})
+    except Exception:
+        pass
     # action menu -> FIGHT -> move list -> home -> step to the slot in the 2x2 grid
     seq = ["UP", "LEFT", "A", "UP", "LEFT"]
     if i % 2:
@@ -427,6 +453,7 @@ def run_milestone(
     _reanchored = False                   # whiteout re-anchor also fires at most once
     _wedge_t, _wedge_f = time.monotonic(), start_frame   # rolling wedge window
     _rival_ready = False                  # levelled AND healed for the Route 103 rival
+    _nurse_done = False                   # counter-talk heal fires at most once
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
     _recent: list = []                    # sliding window of positions (catches oscillation)
@@ -679,7 +706,12 @@ def run_milestone(
         # lives inside nested pathfinder calls, but THIS loop keeps iterating — so
         # count iterations on the wrong map and hand the crossing to goto_map, which
         # understands warps and doors.
-        if _wrongmap == 150 and expected_state is not None:
+        # RETRY, don't fire once. The first version triggered on == 150 exactly, so a
+        # crossing that failed (interrupted by a battle, say) was never attempted
+        # again and the run spun out the milestone anyway -- exp_034 wedged on (7,16)
+        # a fourth time that way, with the log showing the re-anchor had reached
+        # Littleroot but never got through the door.
+        if _wrongmap and _wrongmap % 150 == 0 and expected_state is not None:
             print(f"spine: {_wrongmap} iterations on the wrong map "
                   f"(want {_em_now}) — crossing", flush=True)
             _reanchor_to_expected(runner, expected_state)
@@ -945,6 +977,18 @@ def run_milestone(
                 continue
         if event_id == "MAY_ROUTE103_INTERACTION" and not runner.nav_state().in_battle:
             _rival_ready = _rival_prep_phase(runner) == "engage"
+        # THE NURSE IS UNREACHABLE BY DESIGN. HEAL_AT_RUSTBORO_CENTER's expert policy
+        # does find_path_action(state, 7, 2) -- the nurse's OWN tile -- but she is
+        # sealed behind her counter (row y=3 is "....######....") so BFS can never get
+        # there. The policy therefore spins "No progress possible toward (7, 2)" until
+        # the run dies; exp_031 was killed by the watchdog that way. Our own heal
+        # already knows the trick -- stand at (7,4) and talk ACROSS the counter -- so
+        # hand this milestone to it instead of letting the policy path into a wall.
+        if event_id == "HEAL_AT_RUSTBORO_CENTER" and not _nurse_done:
+            _nurse_done = True
+            if _heal_at_centre(runner, _RUSTBORO_CENTER):
+                print("spine: nurse heal via counter-talk (policy targets an "
+                      "unreachable tile)", flush=True)
         policy_source = "heatz"
         current_before_action = runner.state()
         if not heal_state.get("active") and ce._postcondition_met(

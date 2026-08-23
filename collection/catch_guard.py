@@ -34,10 +34,18 @@ def ball_throw_blocked(runner) -> bool:
         from collection.menu_ram import bag_pocket
 
         st = GBAState(env=runner.env)
-        # Cheap RAM reads first; nav_state() is comparatively expensive and this runs
+        # Cheap RAM read first; nav_state() is comparatively expensive and this runs
         # before every action, so it is only consulted once the bag is actually up.
-        if st.u32(CB2_ADDR) != CB2_BAG or bag_pocket(st) != _POCKET_BALLS:
+        if st.u32(CB2_ADDR) != CB2_BAG:
             return False
-        return bool(runner.nav_state().in_battle)
+        if not runner.nav_state().in_battle:
+            return False                      # overworld bag is legitimate behaviour
+        # POCKET-BLIND ON PURPOSE. The first version refused A only on pocket 1, and a
+        # run still caught a Whismur: "JAXSON used POKe BALL!" at frame 553,176 of
+        # exp_001, straight out of a wild battle the walk had wandered into. Whatever
+        # pocket the cursor is on, this collector has no business confirming anything
+        # in a battle bag -- the party must stay exactly the starter. item_use is the
+        # one legitimate user and opts in explicitly for the moment it needs.
+        return not bool(getattr(runner, "allow_battle_bag", False))
     except Exception:
         return False
