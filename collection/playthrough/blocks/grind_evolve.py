@@ -251,6 +251,29 @@ class GrindEvolve:
         # instead of 35, so runs stalled at L14 having fought almost nothing.
         # Use the fast machine, and keep force_fight for exactly what it is good at:
         # a battle the machine could not finish.
+        # OUT OF AMMUNITION MID-BATTLE -> LEAVE, DO NOT FIGHT. A lead goes dry DURING a
+        # battle, never between them, so the lap-head heal check can never see it:
+        # control stays inside this battle while force_fight below steers to slot 0 and
+        # mashes A at an empty move ("There's no PP left for this move!"), which is the
+        # deadlock the watchdog kills. Measured after the first PP fix shipped:
+        # exp_004 still died on Route 104 with pp=[0,39,30,0], because that fix only
+        # looked between laps.
+        # Read PP from the BATTLE struct, not the party: the party copy is frozen for
+        # the duration of a battle, so it still shows the PP this battle already spent.
+        try:
+            from collection.extractors.ledger_panel import _battle_mon as _bm
+            from collection.extractors.ram import GBAState as _GS
+            from collection.move_data import damaging_slot as _dslot
+            _bmon = _bm(_GS(env=runner.env), 0)
+            if _bmon and _dslot(_bmon.get("moves") or [], _bmon.get("pp") or []) is None:
+                summary["dry_battles"] = summary.get("dry_battles", 0) + 1
+                from collection.playthrough.spine import _flee_wild_if_critical
+                if _flee_wild_if_critical(runner, floor=1.01):
+                    summary["fled_dry"] = summary.get("fled_dry", 0) + 1
+                    return                      # lap head now sees a dry lead -> Centre
+        except Exception as _e:
+            print(f"grind: dry-battle check skipped: {_e!r}", flush=True)
+
         from collection.collect_behaviors import _battle_one
         from collection.playthrough.blocks.base import force_fight
         # BOUND the fast machine so the fallback can actually run. _battle_one resolves

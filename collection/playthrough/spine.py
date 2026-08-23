@@ -184,10 +184,16 @@ def _flee_wild_if_critical(runner, floor: float = 0.30) -> bool:
     for _ in range(6):                                # "Couldn't escape!" is possible
         if not runner.nav_state().in_battle:
             return True
-        # Home the cursor on FIGHT first (LEFT+UP), THEN walk it to RUN at bottom-right:
-        # the cursor keeps wherever a previous press left it, so a bare RIGHT+DOWN lands
-        # somewhere different every time.
-        for _k in ("LEFT", "UP", "RIGHT", "DOWN", "A"):
+        # B FIRST. The caller may be anywhere in the battle UI, not necessarily at the
+        # action menu: a dry lead sits on the MOVE list under "There's no PP left for
+        # this move!", where LEFT/UP/RIGHT/DOWN walk the move cursor and never reach
+        # RUN (measured — the flee silently no-opped and the battle stayed wedged for
+        # 37,502 frames). B backs out of a submenu or dismisses the message; from the
+        # action menu it is harmless.
+        # Then home the cursor on FIGHT (LEFT+UP) before walking it to RUN at
+        # bottom-right: the cursor keeps wherever a previous press left it, so a bare
+        # RIGHT+DOWN lands somewhere different every time.
+        for _k in ("B", "B", "LEFT", "UP", "RIGHT", "DOWN", "A"):
             runner.perform_action(_k, metadata={"src": "flee_critical"})
         _nav._hold(runner, [], 30, "spine")
     return not runner.nav_state().in_battle
