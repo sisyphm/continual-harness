@@ -66,3 +66,24 @@ def out_of_ammo(lead) -> bool:
     if not lead:
         return False
     return damaging_slot(lead.get("moves") or [], lead.get("pp") or []) is None
+
+
+def damaging_pp(lead) -> int:
+    """Total PP across moves that can actually deal damage."""
+    if not lead:
+        return 99
+    mv, pp = lead.get("moves") or [], lead.get("pp") or []
+    return sum(pp[i] for i in range(min(len(mv), len(pp)))
+               if mv[i] and pp[i] > 0 and move_power(mv[i]) > 0)
+
+
+def low_ammo(lead, margin: int = 8) -> bool:
+    """Nearly out of attacking PP — heal NOW, while a Centre trip is still possible.
+
+    Waiting for zero is too late. A lead runs dry in the MIDDLE of a battle, and if that
+    battle is a TRAINER fight it cannot be fled: measured on exp_008_treecko, the only
+    PP left was Leer(29) and draining it to reach Struggle cost ~15k frames per turn,
+    i.e. ~400k frames — far slower than the watchdog's patience. Healing at a margin
+    means the run is never caught empty mid-battle in the first place.
+    """
+    return damaging_pp(lead) <= margin

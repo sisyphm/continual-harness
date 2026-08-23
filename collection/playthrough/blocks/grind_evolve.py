@@ -35,7 +35,7 @@ from __future__ import annotations
 import random
 
 from collection import navigator as nav
-from collection.move_data import out_of_ammo as _out_of_ammo
+from collection.move_data import low_ammo as _low_ammo, out_of_ammo as _out_of_ammo
 from collection.extractors.ledger_panel import (
     CB2_ADDR, CB2_OVERWORLD, PARTY_ADDR, PARTY_COUNT_ADDR, decrypt_party_mon,
 )
@@ -44,6 +44,53 @@ from collection.extractors.ram import GBAState
 
 _NURSE = (7, 2)              # nurse's own tile: talk ACROSS the counter, never path to it
 _RETURN_RESERVE = 60_000     # frames held back for the walk home (116->Rustboro = 972)
+
+
+def drain_to_struggle(runner, rounds: int = 60) -> bool:
+    """Play a battle the lead cannot win on damage, by spending whatever PP is left.
+
+    A TRAINER battle cannot be fled, so the wild-battle escape does not apply. Measured:
+    exp_008_treecko wedged on Route 104 against a trainer holding
+    Pound(pp0) Leer(pp29) Absorb(pp0) QuickAttack(pp0) — every damaging move empty, the
+    driver reselecting slot 0 forever.
+
+    Spending a zero-power move is normally the wrong thing (it stalls the battle instead
+    of the menu), but here it is the only exit: once EVERY slot reaches 0 PP the game
+    forces Struggle, which deals damage and resolves the fight one way or the other.
+    So pick a damaging slot when one exists, otherwise any slot with PP, and let the
+    battle end. Returns True if we are out of the battle.
+    """
+    from collection.extractors.ledger_panel import _battle_mon
+    from collection.extractors.ram import GBAState
+    from collection.move_data import move_power
+
+    def _slot():
+        b = _battle_mon(GBAState(env=runner.env), 0)
+        mv, pp = b.get("moves") or [], b.get("pp") or []
+        for i in range(4):                       # a real attack first
+            if i < len(mv) and mv[i] and pp[i] > 0 and move_power(mv[i]) > 0:
+                return i
+        for i in range(4):                       # else anything that still has PP
+            if i < len(mv) and mv[i] and pp[i] > 0:
+                return i
+        return 0                                 # all empty -> the game gives Struggle
+
+    for _ in range(rounds):
+        if not runner.nav_state().in_battle:
+            return True
+        i = _slot()
+        # B out of any submenu, home the action cursor on FIGHT, open the move list,
+        # home THAT cursor, then step to the wanted slot in the 2x2 grid.
+        seq = ["B", "B", "UP", "LEFT", "A", "UP", "LEFT"]
+        if i % 2:
+            seq.append("RIGHT")
+        if i // 2:
+            seq.append("DOWN")
+        seq.append("A")
+        for k in seq:
+            runner.perform_action(k, metadata={"src": "drain_to_struggle"})
+        nav._hold(runner, [], 40, "grind")
+    return not runner.nav_state().in_battle
 
 
 def read_lead(runner) -> dict | None:
@@ -303,6 +350,34 @@ class GrindEvolve:
         finally:
             runner.step_frame = _orig
         if runner.nav_state().in_battle:
+            # RE-CHECK HERE, not just at entry. The entry check catches a battle we
+            # START dry; the common case is going dry DURING one, which _battle_one
+            # then cannot finish, and this is the handoff where the deadlock forms —
+            # force_fight steers to slot 0 and mashes A at an empty move. Measured:
+            # exp_008 wedged here on Route 104 with battle pp=[0,29,0,0] after the
+            # entry-only check shipped.
+            try:
+                from collection.extractors.ledger_panel import _battle_mon as _bm2
+                from collection.extractors.ram import GBAState as _GS2
+                from collection.move_data import damaging_slot as _ds2
+                _b2 = _bm2(_GS2(env=runner.env), 0)
+                if _b2 and _ds2(_b2.get("moves") or [], _b2.get("pp") or []) is None:
+                    summary["dry_battles"] = summary.get("dry_battles", 0) + 1
+                    from collection.playthrough.spine import _flee_wild_if_critical
+                    if _flee_wild_if_critical(runner, floor=1.01):
+                        summary["fled_dry"] = summary.get("fled_dry", 0) + 1
+                        await_overworld(runner, budget=4000, phase=self.phase)
+                        summary["battles"] += 1
+                        return
+                    # Could not flee -> a TRAINER battle. Spend the remaining PP down to
+                    # Struggle rather than reselect an empty slot forever.
+                    if drain_to_struggle(runner):
+                        summary["drained_to_struggle"] = summary.get("drained_to_struggle", 0) + 1
+                        await_overworld(runner, budget=4000, phase=self.phase)
+                        summary["battles"] += 1
+                        return
+            except Exception as _e2:
+                print(f"grind: dry re-check skipped: {_e2!r}", flush=True)
             force_fight(runner)
         await_overworld(runner, phase=self.phase)
         # Only clear dialogs once the overworld cb2 is genuinely back: _clear_dialog
@@ -410,7 +485,10 @@ class GrindEvolve:
             # driver reselects an empty slot forever ("There's no PP left for this
             # move!"), which the watchdog sees as a battle deadlock. The nurse restores
             # PP as well as HP, so the same Centre trip fixes both.
-            _dry = _out_of_ammo(lead)
+            # Heal at a MARGIN, not at empty: going dry mid-battle in a trainer
+            # fight is unrecoverable (cannot flee, and draining to Struggle costs
+            # ~400k frames), so top up while there is still PP to finish a battle.
+            _dry = _low_ammo(lead)
             if frac < self.hp_floor or _dry:
                 # RIDING THE FAINT COSTS THE RUN THE MAP. The old comment below argued a
                 # whiteout is a free heal that simply returns us to the grass. Measured
