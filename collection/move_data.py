@@ -87,3 +87,97 @@ def low_ammo(lead, margin: int = 8) -> bool:
     means the run is never caught empty mid-battle in the first place.
     """
     return damaging_pp(lead) <= margin
+
+
+# --------------------------------------------------------------------------- types
+# struct BaseStats is 28 bytes; type1 at +6, type2 at +7. Located the same structural
+# way as gBattleMoves: the unique ROM offset where five known species types agree.
+_BS_ENTRY = 28
+_BS_T1, _BS_T2 = 6, 7
+_BASE_STATS: int | None = None
+_BS_ANCHORS = ((277, 12, 12), (280, 10, 10), (283, 11, 11), (74, 5, 4), (95, 5, 4))
+
+NORMAL, FIGHT, FLY, POISON, GROUND, ROCK, BUG, GHOST, STEEL = 0, 1, 2, 3, 4, 5, 6, 7, 8
+FIRE, WATER, GRASS, ELEC, PSY, ICE, DRAGON, DARK = 10, 11, 12, 13, 14, 15, 16, 17
+
+# Gen-3 chart: only the non-1x entries.
+_CHART = {
+    NORMAL: {ROCK: .5, STEEL: .5, GHOST: 0},
+    FIGHT:  {NORMAL: 2, ROCK: 2, STEEL: 2, ICE: 2, DARK: 2,
+             FLY: .5, POISON: .5, BUG: .5, PSY: .5, GHOST: 0},
+    FLY:    {FIGHT: 2, BUG: 2, GRASS: 2, ROCK: .5, STEEL: .5, ELEC: .5},
+    POISON: {GRASS: 2, POISON: .5, GROUND: .5, ROCK: .5, GHOST: .5, STEEL: 0},
+    GROUND: {FIRE: 2, ELEC: 2, POISON: 2, ROCK: 2, STEEL: 2, GRASS: .5, BUG: .5, FLY: 0},
+    ROCK:   {FIRE: 2, ICE: 2, FLY: 2, BUG: 2, FIGHT: .5, GROUND: .5, STEEL: .5},
+    BUG:    {GRASS: 2, PSY: 2, DARK: 2, FIRE: .5, FIGHT: .5, POISON: .5, FLY: .5,
+             GHOST: .5, STEEL: .5},
+    GHOST:  {PSY: 2, GHOST: 2, DARK: .5, STEEL: .5, NORMAL: 0},
+    STEEL:  {ICE: 2, ROCK: 2, FIRE: .5, WATER: .5, ELEC: .5, STEEL: .5},
+    FIRE:   {GRASS: 2, ICE: 2, BUG: 2, STEEL: 2, FIRE: .5, WATER: .5, ROCK: .5, DRAGON: .5},
+    WATER:  {FIRE: 2, GROUND: 2, ROCK: 2, WATER: .5, GRASS: .5, DRAGON: .5},
+    GRASS:  {WATER: 2, GROUND: 2, ROCK: 2, FIRE: .5, GRASS: .5, POISON: .5, FLY: .5,
+             BUG: .5, DRAGON: .5, STEEL: .5},
+    ELEC:   {WATER: 2, FLY: 2, ELEC: .5, GRASS: .5, DRAGON: .5, GROUND: 0},
+    PSY:    {FIGHT: 2, POISON: 2, PSY: .5, STEEL: .5, DARK: 0},
+    ICE:    {GRASS: 2, GROUND: 2, FLY: 2, DRAGON: 2, FIRE: .5, WATER: .5, ICE: .5, STEEL: .5},
+    DRAGON: {DRAGON: 2, STEEL: .5},
+    DARK:   {PSY: 2, GHOST: 2, FIGHT: .5, DARK: .5, STEEL: .5},
+}
+
+
+def _load_base_stats(rom_path: str = "Emerald-GBAdvance/rom.gba") -> None:
+    global _BASE_STATS
+    if _BASE_STATS is not None:
+        return
+    _load(rom_path)
+    for base in range(0, len(_ROM) - _BS_ENTRY * 400, 4):
+        if all(_ROM[base + _BS_ENTRY * s + _BS_T1] == t1
+               and _ROM[base + _BS_ENTRY * s + _BS_T2] == t2 for s, t1, t2 in _BS_ANCHORS):
+            _BASE_STATS = base
+            return
+    raise RuntimeError("gBaseStats not found")
+
+
+def move_type(move_id: int) -> int:
+    _load()
+    return _ROM[_TABLE + _ENTRY * int(move_id) + 2] if move_id else NORMAL
+
+
+def species_types(species_id: int) -> tuple[int, int]:
+    _load_base_stats()
+    o = _BASE_STATS + _BS_ENTRY * int(species_id)
+    return _ROM[o + _BS_T1], _ROM[o + _BS_T2]
+
+
+def effectiveness(mtype: int, foe_types) -> float:
+    row = _CHART.get(mtype, {})
+    mult = 1.0
+    for t in dict.fromkeys(foe_types):        # dedupe single-typed mons
+        mult *= row.get(t, 1.0)
+    return mult
+
+
+def best_slot(moves, pp, foe_species: int | None = None):
+    """Slot that does the most damage to THIS foe. None = nothing damaging is available.
+
+    The driver used to take slot 0 unconditionally, which is type-blind and lost the
+    rock gym repeatedly: a treecko holding Absorb (GRASS, 2x on rock) attacked with
+    Pound (NORMAL, 0.5x) and fought at a quarter of the damage it had. Every starter
+    carries a super-effective answer there — Absorb, Double Kick, Water Gun/Mud-Slap —
+    and the old selector could not see any of them.
+    """
+    try:
+        foe = tuple(species_types(foe_species)) if foe_species else ()
+    except Exception:
+        foe = ()
+    best, best_score = None, 0.0
+    for i in range(4):
+        if i >= len(moves) or i >= len(pp) or not moves[i] or pp[i] <= 0:
+            continue
+        power = move_power(moves[i])
+        if power <= 0:
+            continue
+        score = power * (effectiveness(move_type(moves[i]), foe) if foe else 1.0)
+        if score > best_score:
+            best, best_score = i, score
+    return best

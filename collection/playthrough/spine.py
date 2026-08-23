@@ -124,6 +124,9 @@ def _reanchor_to_expected(runner, expected_state) -> bool:
         dst = keys.get(str(em).upper())
         if not dst:
             return False
+        # If we are stranded in Route 104's south half, no amount of re-routing helps
+        # until we are back in the north half — cross the seam first.
+        _cross_route104_seam(runner)
         # The walk home crosses two routes of tall grass, so it WILL be interrupted;
         # goto_map returns "battle" partway and one attempt only gets us halfway
         # (measured: bedroom -> ROUTE 101 (13,13), still a map short of Oldale).
@@ -199,6 +202,85 @@ def _flee_wild_if_critical(runner, floor: float = 0.30) -> bool:
     return not runner.nav_state().in_battle
 
 
+# Route 104 is ONE map id with TWO disjoint walkable halves, joined only through
+# Petalburg Woods. The map graph cannot express that: a path that leaves 0,19 and
+# re-enters 0,19 is unreachable in a BFS whose nodes are maps, so map_route always
+# answers "cross the north edge" — unwalkable from the south, and 8 runs died on it.
+# Measured live from a stranded run at (28,58): of Route 104's six woods warps only
+# (10,38)/(11,38) are reachable from the south half — (32,42)/(33,42) and the north
+# pair (10,30) all return "stuck". That warp lands in the woods at (17,38); the woods'
+# NORTH exit (14,5)/(15,5) comes back out in Route 104's north half.
+_R104 = "0,19"
+_R104_SOUTH_MIN_Y = 40          # BFS from the south reaches no tile above y=38
+_R104_SOUTH_WARP = (10, 38)
+_WOODS = "24,11"
+_WOODS_NORTH_WARP = (14, 5)
+
+
+def _cross_route104_seam(runner) -> bool:
+    """South half -> woods -> north half. True if we end up in the north half."""
+    from collection import navigator as _nav
+    t, x, y = _nav._state(runner)
+    if t is None or f"{t.map_group},{t.map_num}" != _R104 or y < _R104_SOUTH_MIN_Y:
+        return False
+    print(f"spine: Route 104 seam — south half at ({x},{y}), routing via the woods",
+          flush=True)
+    def _warp_through_battles(wx, wy, tries=6):
+        """goto_warp, resolving whatever interrupts it. Petalburg Woods is thick with
+        wild grass and trainers, so a single call almost always returns "battle"
+        partway: measured (17,38) -> (12,32) -> (10,32), real progress each time."""
+        for _ in range(tries):
+            r = _nav.goto_warp(runner, _nav.MapKnowledge(), wx, wy, budget=30_000)
+            if r == "crossed":
+                return True
+            if r != "battle":
+                return False
+            if not _flee_wild_if_critical(runner, floor=1.01):
+                _battle_protected(runner, rounds=80)     # trainer: play it out
+        return False
+
+    if not _warp_through_battles(*_R104_SOUTH_WARP):
+        return False
+    if not _warp_through_battles(*_WOODS_NORTH_WARP):
+        return False
+    t2, x2, y2 = _nav._state(runner)
+    ok = t2 is not None and f"{t2.map_group},{t2.map_num}" == _R104 and y2 < _R104_SOUTH_MIN_Y
+    print(f"spine: Route 104 seam -> ({x2},{y2}) north={ok}", flush=True)
+    return ok
+
+
+def _press_best_move(runner) -> None:
+    """Select the move that does the most damage to the CURRENT foe, and use it.
+
+    The old steer was UP+LEFT+A — always slot 0, type-blind. Against Roxanne's
+    ROCK/GROUND mons that is actively wrong: a treecko holding Absorb (GRASS, 2x)
+    attacked with Pound (NORMAL, 0.5x) and fought at a quarter of its damage; mudkip
+    ignored Water Gun the same way. Every starter carries a super-effective answer
+    there, so read the foe's species, score each slot by power x effectiveness, and
+    press that one.
+    """
+    from collection.extractors.ledger_panel import _battle_mon
+    from collection.extractors.ram import GBAState
+    from collection.move_data import best_slot
+    try:
+        st = GBAState(env=runner.env)
+        me, foe = _battle_mon(st, 0), _battle_mon(st, 1)
+        i = best_slot(me.get("moves") or [], me.get("pp") or [], foe.get("species"))
+    except Exception:
+        i = 0
+    if i is None:
+        i = 0                                    # nothing damaging: let the caller cope
+    # action menu -> FIGHT -> move list -> home -> step to the slot in the 2x2 grid
+    seq = ["UP", "LEFT", "A", "UP", "LEFT"]
+    if i % 2:
+        seq.append("RIGHT")
+    if i // 2:
+        seq.append("DOWN")
+    seq.append("A")
+    for k in seq:
+        runner.perform_action(k, metadata={"src": "best_move"})
+
+
 def _battle_protected(runner, rounds: int = 160) -> None:
     """Play a battle out while REFUSING to trade Double Kick away.
 
@@ -261,7 +343,7 @@ def _battle_protected(runner, rounds: int = 160) -> None:
             _lv = _cur["level"]
             _i = 0
             continue
-        runner.perform_action(_seq[_i % 3])
+        _press_best_move(runner)
         _i += 1
         _nav._hold(runner, [], 40, "spine")
 
@@ -343,6 +425,7 @@ def run_milestone(
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map recovery fires at most once per attempt
     _reanchored = False                   # whiteout re-anchor also fires at most once
+    _wedge_t, _wedge_f = time.monotonic(), start_frame   # rolling wedge window
     _rival_ready = False                  # levelled AND healed for the Route 103 rival
     _last_pos = None                      # position-based stall signal (survives dry solves)
     _stuck_pos = 0
@@ -384,8 +467,19 @@ def run_milestone(
         # before the wall budget expires. That cost 13 of the wave's 17 failures a full
         # 240 s each. Fail at a quarter of it: the retry machinery re-runs the milestone
         # from a clean state, which is always cheaper than spinning.
-        if (time.monotonic() - t_start > 60.0
-                and runner.frame_idx - start_frame < 2000):
+        # RECENT progress, not cumulative. The first version compared against the
+        # MILESTONE's start frame, so a milestone that legitimately advanced and then
+        # wedged could never trip it: exp_019 sat frozen on Roxanne's tile for two
+        # hours with delta=38,419 -- far over the 2000 threshold -- while stepping zero
+        # frames. Measure a rolling window instead, so a late stall is caught the same
+        # as an early one.
+        _now = time.monotonic()
+        if _now - _wedge_t > 90.0:
+            _wedge_stalled = (runner.frame_idx - _wedge_f) < 2000
+            _wedge_t, _wedge_f = _now, runner.frame_idx
+        else:
+            _wedge_stalled = False
+        if _wedge_stalled:
             # Displaced (whiteout) rather than merely stuck? Walk back onto the
             # milestone's map ONCE and give it a fresh budget, then fail if it is
             # still crawling — a run that recovers is worth far more than one that
@@ -578,6 +672,17 @@ def run_milestone(
         # belongs.
         _em_now = getattr(expected_state, "map", None) if expected_state is not None else None
         _wrongmap = (_wrongmap + 1) if (_em_now and runner.nav_state().map != _em_now) else 0
+        # CROSS, don't spin. When the milestone's target is on another map the policy
+        # paths that map's coordinates against the grid under our feet and never
+        # arrives: exp_034 spun 300+ times on (7,16), a tile inside Birch's Lab, while
+        # standing in Littleroot. The frame-progress guards miss it because the spin
+        # lives inside nested pathfinder calls, but THIS loop keeps iterating — so
+        # count iterations on the wrong map and hand the crossing to goto_map, which
+        # understands warps and doors.
+        if _wrongmap == 150 and expected_state is not None:
+            print(f"spine: {_wrongmap} iterations on the wrong map "
+                  f"(want {_em_now}) — crossing", flush=True)
+            _reanchor_to_expected(runner, expected_state)
         _last_pos = _pos
         if _stuck_pos and not _crossed_once and expected_state is not None:
             _gx = getattr(expected_state, "x", None)
@@ -831,7 +936,10 @@ def run_milestone(
                 continue
             from collection.playthrough.blocks.grind_evolve import read_lead as _rl2
             _lead2 = _rl2(runner)
-            if _lead2 and 24 in set(_lead2.get("moves") or ()):
+            # ROXANNE gets the protected loop whatever the starter holds: it is the one
+            # driver that picks by type, and treecko/mudkip never held the keeper move
+            # so they used to fall through to the type-blind path and lose.
+            if event_id == "ROXANNE_BATTLE" or (_lead2 and 24 in set(_lead2.get("moves") or ())):
                 _battle_protected(runner, rounds=60)
                 actions_taken += 1
                 continue
