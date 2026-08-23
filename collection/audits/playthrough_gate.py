@@ -109,6 +109,36 @@ def party_fidelity(st: GBAState) -> tuple[int, list[str], list[str]]:
     return n, names, reasons
 
 
+def _unexplained_frames(run_dir: Path, restores: list[dict]) -> list[int]:
+    """Visual frames with no action row that no logged restore accounts for.
+
+    A restore is logged with the frame_idx it resumed AT, while the frame it wrote is
+    the one just before; accept either side rather than guessing the convention.
+    """
+    acts: set[int] = set()
+    with open(run_dir / "actions.jsonl") as f:
+        for line in f:
+            try:
+                acts.add(json.loads(line)["frame_idx"])
+            except Exception:
+                continue
+    vis: list[int] = []
+    with open(run_dir / "frames.jsonl") as f:
+        for line in f:
+            try:
+                vis.append(json.loads(line)["visual_frame_idx"])
+            except Exception:
+                continue
+    if not vis:
+        return []
+    last = max(vis)
+    ok = set()
+    for x in restores:
+        fi = x.get("frame_idx")
+        if isinstance(fi, int):
+            ok.update((fi - 1, fi, fi + 1))
+    return [f for f in sorted(set(vis) - acts) if f != last and f not in ok]
+
 def count_lines(p: Path) -> int:
     n = 0
     with open(p, "rb") as f:
@@ -145,11 +175,37 @@ def gate_run(run_dir: Path) -> dict:
         n_actions = count_lines(run_dir / "actions.jsonl")
         n_frames_jsonl = count_lines(run_dir / "frames.jsonl")
         vis = man.get("visual_frame_count")
+        # RESTORES ARE FRAMES TOO. The original S1 rule read `vis == actions+1 == ppu+1`,
+        # which predates savestate restores: DirectEmulatorRunner.restore() calls
+        # record_current_frame(phase="restore"), writing a visual frame with no action
+        # row. Every run therefore failed this check -- including the ones counted as
+        # gate-valid, because full_audit.py only ever checked badge + party fidelity and
+        # never called gate_run(). Measured, the offset is exact and fully explained:
+        #
+        #   exp_052  visual 533693  actions 533691  recorded restores 1
+        #   exp_022  visual 438392  actions 438390  recorded restores 1
+        #   exp_040  visual 771125  actions 771122  recorded restores 2
+        #
+        #   visual == actions + 1 + recorded_restores       (+1 = the final frame,
+        #                                                    which has no action after it)
+        #
+        # Do NOT just widen the arithmetic -- that would let genuine hidden frames
+        # through. Check PROVENANCE: every visual frame lacking an action row must be
+        # either the last frame or the one a logged restore wrote. That is the
+        # "no hidden frames" property the restore_log exists to prove, and it is a
+        # strictly stronger test than the count it replaces.
+        restores = [x for x in (man.get("restores") or []) if x.get("recorded")]
+        n_restore = len(restores)
         r["channels"] = {"frames_jsonl": n_frames_jsonl, "actions": n_actions,
-                         "ppu": n_ppu, "visual": vis}
-        # S1 rule: visual frames = actions + 1 = ppu + 1
-        if not (vis == n_actions + 1 == n_ppu + 1):
+                         "ppu": n_ppu, "visual": vis, "recorded_restores": n_restore}
+        if not (vis == n_actions + 1 + n_restore == n_ppu + 1 + n_restore):
             r["reasons"].append(f"channel misalignment {r['channels']}")
+        else:
+            unexplained = _unexplained_frames(run_dir, restores)
+            if unexplained:
+                r["reasons"].append(
+                    f"{len(unexplained)} visual frames with no action row and no logged "
+                    f"restore: {unexplained[:5]}")
         # frames.jsonl contiguity (first/last index sanity)
         with open(run_dir / "frames.jsonl") as f:
             first = json.loads(f.readline())
