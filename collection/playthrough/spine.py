@@ -284,6 +284,17 @@ def _press_best_move(runner) -> None:
     # wall_time_exceeded). Stray presses landing on text are harmless; the sequence as
     # written wins. Fix the ONE catastrophic outcome reactively instead, below.
     #
+    # DO NOT ADD B PRESSES TO THIS PATH. Three separate attempts to make the steer
+    # more defensive each regressed a gym fight it had been winning: a menu gate on
+    # the "What will ... do?" text (badges=0 on both gyms), a blanket B prefix
+    # (exp_031 win -> wall_time_exceeded), and an "unwind the submenu" guard keyed on
+    # CB2 0x081A____/0x081B____ (exp_031 win -> nav_wedge_frame_rate_collapse again).
+    # The last one explains the pattern: the battle's OWN action and move menus live
+    # in that CB2 range, so the guard cancelled legitimate move selection every round.
+    # The submenu desync is real -- exp_031 died cycling the POKeMON summary screens --
+    # but it is intermittent and the retry machinery re-collects those runs, whereas
+    # every "fix" so far has broken a fight that was working. Leave it alone until
+    # there is a discriminator that separates the action menu from the party menu.
     # RUN-IN-A-TRAINER-BATTLE. If the opening A is eaten by a text box the following
     # UP/LEFT walk the ACTION cursor and the closing A can confirm RUN, which a
     # trainer battle refuses -- exp_019 spent a whole milestone reading "No! There's
@@ -706,12 +717,18 @@ def run_milestone(
         # lives inside nested pathfinder calls, but THIS loop keeps iterating — so
         # count iterations on the wrong map and hand the crossing to goto_map, which
         # understands warps and doors.
+        # FIRE EARLY. The crossing itself is slow (goto_map through grass and
+        # trainers), so waiting 150 iterations left too little of the attempt's wall
+        # budget to finish it: measured, the crossing SUCCEEDS from all four of
+        # exp_034's archived wedge states when called directly, yet the cold run
+        # failed four times -- it simply ran out of clock mid-crossing and the next
+        # attempt started the count over. 40 iterations is still a real stall.
         # RETRY, don't fire once. The first version triggered on == 150 exactly, so a
         # crossing that failed (interrupted by a battle, say) was never attempted
         # again and the run spun out the milestone anyway -- exp_034 wedged on (7,16)
         # a fourth time that way, with the log showing the re-anchor had reached
         # Littleroot but never got through the door.
-        if _wrongmap and _wrongmap % 150 == 0 and expected_state is not None:
+        if _wrongmap and _wrongmap % 40 == 0 and expected_state is not None:
             print(f"spine: {_wrongmap} iterations on the wrong map "
                   f"(want {_em_now}) — crossing", flush=True)
             _reanchor_to_expected(runner, expected_state)
