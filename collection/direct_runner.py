@@ -12,6 +12,7 @@ import numpy as np
 from collection.catch_guard import ball_throw_blocked
 from collection.nickname_guard import nickname_prompt_open
 from collection.move_keeper import resolve as move_keeper_resolve, swap_prompt_open
+from collection.battle_menu_guard import submenu_trap_open
 from collection.actions import ActionTiming, PaceProbe, paced_action_frames, run_action_frames, update_facing
 from collection.recorder import ChunkRecorder
 from collection.state import AbstractState, control_mode, location_name, read_compact_state, safe_call
@@ -252,6 +253,13 @@ class DirectEmulatorRunner:
         # next one to rediscover the bug. See collection/nickname_guard.py.
         if str(action).upper() == "A" and (
                 nickname_prompt_open(self.env) or ball_throw_blocked(self)):
+            action = "B"
+
+        # A battle party/summary screen answers only to B. Every button, not just A:
+        # the steer's UP/LEFT do nothing there, so translating A alone would take ~15
+        # presses to walk out instead of 5. See collection/battle_menu_guard.py for the
+        # 50,000-frame full-HP deadlock this ends.
+        if submenu_trap_open(self):
             action = "B"
 
         # Same reasoning, one level up: the forget-a-move prompt cannot be answered by
