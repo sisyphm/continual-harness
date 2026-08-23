@@ -475,6 +475,7 @@ def run_milestone(
     _adjacent_fired = 0                   # total firings, incl. ones that met a trainer
     _warped_tries = 0                     # wrong-map (door) search: up to 3 per attempt
     _wrongmap = 0                         # consecutive iterations spent on the WRONG map
+    _ongoal = 0                           # consecutive iterations STANDING on the goal tile
     t_start_frames = runner.frame_idx
     battle_stall = 0                      # consecutive in-battle iterations with no frames
     nav_stall = 0                         # ditto, out of battle (map-edge / blocked goal)
@@ -732,6 +733,49 @@ def run_milestone(
             print(f"spine: {_wrongmap} iterations on the wrong map "
                   f"(want {_em_now}) — crossing", flush=True)
             _reanchor_to_expected(runner, expected_state)
+        # ARRIVING IS ALSO THE TRIGGER, NOT ONLY STALLING. The talk recovery below is
+        # gated on _stuck_pos, which needs 200 iterations spent inside four tiles -- a
+        # total a run that WANDERS never reaches. Measured on exp_019: it walked to
+        # (5,3), Roxanne's own doorstep, stood there, walked back out of the gym to
+        # RUSTBORO CITY (20,22), came back, stood on (5,3) again -- so the position
+        # window always held a dozen tiles, _stuck_pos stayed 0, and the recovery that
+        # wins this fight never ran once in five 8-minute attempts. Standing ON the
+        # goal tile with the postcondition still unmet is stronger evidence than any
+        # stall: the walk has already done its job and something other than walking is
+        # needed. Count that directly.
+        _ongoal = (_ongoal + 1) if (
+            expected_state is not None
+            and _pos == (getattr(expected_state, "map", None),
+                         getattr(expected_state, "x", None),
+                         getattr(expected_state, "y", None))
+            and not runner.nav_state().in_battle) else 0
+        # ...BUT ONLY WHERE THERE IS SOMEONE TO TALK TO. Arrival alone is too weak a
+        # trigger on its own: plenty of milestones park the player on the expected tile
+        # while a SEMANTIC postcondition is still pending, and firing a talk recovery
+        # there just burns the attempt's wall budget on an empty tile. Measured, that
+        # cost TEAM_AQUA_GRUNT_DEFEATED -> ROUTE_104_NORTH the sweep, twice in a row at
+        # exactly 40 actions. The recovery exists to reach an NPC standing next to the
+        # goal, so require an NPC to actually be standing there.
+        _npc_adj = False
+        if _ongoal >= 3:
+            try:
+                from collection.heatz_adapter import _npc_blocked_tiles as _nbt
+                _n2 = runner.nav_state()
+                _npc_adj = any(abs(nx - _n2.x) + abs(ny - _n2.y) == 1
+                               for nx, ny in _nbt(runner.env,
+                                                  exclude_xy=(_n2.x, _n2.y)))
+            except Exception:
+                _npc_adj = False
+        # ...AND ONLY WHERE TALKING IS WHAT THE MILESTONE WANTS. Requiring an adjacent
+        # NPC is still not enough -- ROUTE 104 NORTH has villagers standing near its
+        # goal tile, so the recovery fired there anyway and lost the sweep at exactly
+        # 40 actions, twice, where the unpatched control passed at 79. The stall
+        # trigger keeps its old, broad behaviour; ARRIVAL only opens the gate for the
+        # milestones whose postcondition an NPC actually satisfies -- a trainer fight
+        # or the rival. Everywhere else, standing on the goal tile means keep walking.
+        _talk_wins = bool(event_id) and ("BATTLE" in event_id
+                                         or event_id == "MAY_ROUTE103_INTERACTION")
+        _arrived_at_npc = _ongoal >= 3 and _npc_adj and _talk_wins
         _last_pos = _pos
         if _stuck_pos and not _crossed_once and expected_state is not None:
             _gx = getattr(expected_state, "x", None)
@@ -766,7 +810,15 @@ def run_milestone(
         # which misled me for hours: solve-then-record only writes frames once a
         # milestone is solved, so 601 meant "nothing solved yet", not "frozen".
         _cutscene = False
-        if _stuck_pos or _wrongmap >= 600:
+        if _stuck_pos or _arrived_at_npc or _wrongmap >= 600:
+            # _ongoal BELONGS IN THIS TEST TOO. Adding it to the recovery gate below
+            # without adding it here left _cutscene stale at False whenever arrival was
+            # the only trigger, so the recovery drove straight into scripted scenes:
+            # measured, that regressed the sweep 49 -> 46, and the three it broke were
+            # PLAYER_NAME_SET, STARTER_CHOSEN and ROUTE_104_NORTH -- the opening
+            # cutscenes, where the player stands on the expected tile by design while
+            # the scene plays. Every trigger that can open that gate has to ask whether
+            # a cutscene is running first.
             from collection import navigator as _nav0
             _cutscene = _nav0._dialog_open(runner)
         if (_stuck_pos or _wrongmap >= 600) and not _cutscene and _warped_tries < 1 \
@@ -808,7 +860,8 @@ def run_milestone(
         # and then burned 2,039,665 frames over five attempts without ever starting the
         # fight. Adjacency is all a talk or sight trigger needs. Same stall gate as the
         # other recoveries, so it cannot fire speculatively.
-        if _stuck_pos and not _cutscene and _adjacent_once < 8 and _adjacent_fired < 20 \
+        if (_stuck_pos or _arrived_at_npc) and not _cutscene and _adjacent_once < 8 \
+                and _adjacent_fired < 20 \
                 and not runner.nav_state().in_battle \
                 and expected_state is not None:
             _em = getattr(expected_state, "map", None)
@@ -834,6 +887,7 @@ def run_milestone(
                         and _rival_prep_phase(runner) != "engage"):
                     _recent.clear()
                     _stuck_pos = 0
+                    _ongoal = 0
                     _prep = _rival_prep_phase(runner)
                     if _prep == "heal" and _heal_at_centre(runner, _OLDALE_CENTER):
                         # The nurse leaves us standing INSIDE the Centre, and the
@@ -853,6 +907,7 @@ def run_milestone(
                     # frames while its frame counter kept climbing.
                     _recent.clear()
                     _stuck_pos = 0
+                    _ongoal = 0
 
                     def _goal(t, beh, gx=_gx, gy=_gy):
                         m = _np.zeros(t.grid.shape, bool)

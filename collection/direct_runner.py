@@ -11,6 +11,7 @@ import numpy as np
 
 from collection.catch_guard import ball_throw_blocked
 from collection.nickname_guard import nickname_prompt_open
+from collection.move_keeper import resolve as move_keeper_resolve, swap_prompt_open
 from collection.actions import ActionTiming, PaceProbe, paced_action_frames, run_action_frames, update_facing
 from collection.recorder import ChunkRecorder
 from collection.state import AbstractState, control_mode, location_name, read_compact_state, safe_call
@@ -53,6 +54,7 @@ class DirectEmulatorRunner:
         self.frame_hook = frame_hook
         self.env = None
         self.frame_idx = 0
+        self._in_move_keeper = False   # re-entrancy: move_keeper drives its own actions
         self.last_recorded_state: AbstractState | None = None
         # W33: every restore is tallied (frame position + whether it was recorded) so
         # the manifest can prove "no hidden frames" — the replay audit's precondition.
@@ -251,6 +253,20 @@ class DirectEmulatorRunner:
         if str(action).upper() == "A" and (
                 nickname_prompt_open(self.env) or ball_throw_blocked(self)):
             action = "B"
+
+        # Same reasoning, one level up: the forget-a-move prompt cannot be answered by
+        # vetoing a single button — declining it takes two correctly timed answers and
+        # every attempt at that still lost the move. So this guard RESOLVES the prompt
+        # itself, which means re-entering perform_action; the flag keeps that one level
+        # deep. See collection/move_keeper.py for the frame-by-frame loss it prevents.
+        if not self._in_move_keeper and swap_prompt_open(self):
+            self._in_move_keeper = True
+            try:
+                kept = move_keeper_resolve(self)
+                print(f"move_keeper: forget-prompt answered, Double Kick "
+                      f"{'kept' if kept else 'LOST'}", flush=True)
+            finally:
+                self._in_move_keeper = False
 
         self.facing = update_facing(self.facing, action)
         if timing is not None:
