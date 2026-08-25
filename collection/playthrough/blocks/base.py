@@ -281,9 +281,28 @@ def run_nav_block(runner, block, *, mk=None, return_budget: int = 30000) -> dict
     # and would veto perfectly clean states.
     st0 = _settle_for_block(runner)
     t, x, y = nav._state(runner)
-    if st0.in_battle or st0.control_mode != "free_overworld" or is_dialog_open(_hstate(runner)) or t is None:
+    if st0.in_battle or is_dialog_open(_hstate(runner)) or t is None:
         return dict(block=block.name, ran=False, reason="precondition_not_overworld",
                     frames=runner.frame_idx - start_frame)
+    if st0.control_mode != "free_overworld":
+        # Movement test beats the position-poisoned control_mode — the SAME fix as
+        # run_block, which W34's verification wave proved insufficient alone: the
+        # nav blocks come through THIS wrapper, and its untouched check kept
+        # skipping the ROUTE_104_SOUTH trainer block in all three fresh runs while
+        # the player stood freely movable in Petalburg reading mode='dialogue'.
+        back = None
+        for d, b in (("left", "right"), ("right", "left"), ("up", "down"), ("down", "up")):
+            if nav._step(runner, d):
+                back = b
+                break
+        if back is None:
+            return dict(block=block.name, ran=False, reason="precondition_not_overworld",
+                        frames=runner.frame_idx - start_frame)
+        nav._step(runner, back)
+        t, x, y = nav._state(runner)
+        if t is None:
+            return dict(block=block.name, ran=False, reason="precondition_not_overworld",
+                        frames=runner.frame_idx - start_frame)
     anchor = (f"{t.map_group},{t.map_num}", x, y)
     entry_snap = runner.save_state_bytes()
     runner.set_phase(block.phase)
