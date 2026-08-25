@@ -355,8 +355,14 @@ def build_plan(seed0: int = 20260825) -> dict:
     for i, run in enumerate(runs):
         s = run["seed"]
         run["block_schedule"] += [
-            ["PETALBURG_CITY", "interaction",
-             {"frames": interaction_budget(world, "PETALBURG_CITY", towns[i % 3]),
+            # Each town's interaction anchors at ITS OWN window (W34 verify wave:
+            # cross-seam travel to Rustboro burned even the hop-priced 82,400 —
+            # nav's map_route is not seam-aware, so remote interactions never
+            # arrive; local ones measured 9.5-13.6k total).
+            [{"0,10": "OLDALE_AFTER_POKEDEX", "0,0": "PETALBURG_CITY",
+              "0,3": "RUSTBORO_CITY"}[towns[i % 3]], "interaction",
+             {"frames": interaction_budget(world, {"0,10": "OLDALE_AFTER_POKEDEX",
+              "0,0": "PETALBURG_CITY", "0,3": "RUSTBORO_CITY"}[towns[i % 3]], towns[i % 3]),
               "maps": [towns[i % 3]], "seed": s % 7001}],
             # mart_buy wants a TOWN OVERWORLD key (it scans the town's warps for the
             # gfx==83 clerk); pc_access wants the Center 1F interior. Wave 1 passed
