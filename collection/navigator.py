@@ -203,6 +203,14 @@ def _clear_dialog(runner, phase: str = "nav", max_cycles: int = 60) -> None:
     that end in a YES/NO prompt (the Center-2F attendant's wireless pitch: A accepts and re-enters
     the script; B declines and actually ends it — established by screenshot after 60 A-presses)."""
     for i in range(max_cycles):
+        # NEVER press into a battle (W34, forensics on rg_001's caught Lotad): a
+        # wild encounter mid-walk freezes the step, the refusal routes here via
+        # _unstick, and battle text reads as an "open dialog" — so this cycle
+        # A-mashed the battle menus for its full 60 rounds through raw _hold,
+        # bypassing every perform_action guard, and bought a Poke Ball. Battles
+        # belong to the caller's in_battle handling; bail and let it see one.
+        if _in_battle(runner):
+            return
         if not _dialog_open(runner):
             return
         _hold(runner, ["B" if i % 3 == 2 else "A"], 3, phase)
@@ -222,6 +230,8 @@ def _release_lock(runner, phase: str = "nav") -> bool:
     Returns True as soon as a real step lands (the walk re-plans from there anyway).
     """
     for _ in range(8):
+        if _in_battle(runner):
+            return False                  # battle owns the screen; caller handles it
         _hold(runner, ["B"], 3, phase)
         _hold(runner, [], 14, phase)
         for d in ("down", "left", "right", "up"):
@@ -236,6 +246,8 @@ def _unstick(runner, phase: str = "nav") -> None:
     pending triggers — mash B then A, then give the script time to run its course)."""
     _clear_dialog(runner, phase)
     for b in ("B", "B", "B", "A", "A", "A", "B"):
+        if _in_battle(runner):            # same law as _clear_dialog: a battle that
+            return                        # started mid-mash must not eat these A's
         _hold(runner, [b], 3, phase)
         _hold(runner, [], 12, phase)
     _hold(runner, [], 25, phase)                              # a box the A-mash reopened (e.g.
