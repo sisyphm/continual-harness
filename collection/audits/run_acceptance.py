@@ -83,6 +83,12 @@ def audit(run_dir: Path, plan_path: str, log_path: Path | None) -> dict:
     if entry is None:
         return {"run": run_id, "verdict": "FAIL", "defects": ["no plan entry"]}
     lg = log_path.read_text(errors="replace") if log_path and log_path.exists() else ""
+    # Supervisor logs APPEND across relaunches; receipts from dead earlier attempts
+    # must not pollute this run's reconciliation. The boot provenance write marks
+    # each attempt's start — audit only the final segment.
+    i = lg.rfind("No Pokemon found in party")   # boots once per launch, pre-starter
+    if i > 0:
+        lg = lg[i:]
 
     # 1 gate ------------------------------------------------------------------
     from collection.audits.playthrough_gate import gate_run
