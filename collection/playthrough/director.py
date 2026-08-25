@@ -426,7 +426,14 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     except Exception:
                         last, since = f, 0
                         continue                          # mid-transition reads throw
-                    party_bad = party_bad + 1 if pc not in (0, 1) else 0
+                    # The Wally catch tutorial (DAD_FIRST_MEETING, Petalburg Gym)
+                    # legitimately loans Wally's Zigzagoon through the PLAYER's party
+                    # — story-legal party==2 for the scripted scene. Caught live: the
+                    # tripwire killed a healthy run mid-Norman-speech. No wild
+                    # encounter exists inside any gym, so a REAL catch cannot
+                    # originate there: suppress the check on gym maps only.
+                    in_gym = "GYM" in str(key[1] or "").upper()
+                    party_bad = party_bad + 1 if (pc not in (0, 1) and not in_gym) else 0
                     if party_bad >= 2:                    # 0 = pre-starter boot
                         try:
                             Path(outdir, "STALL.json").write_text(_json.dumps(

@@ -60,6 +60,11 @@ def _party_scan(run_dir: Path, defects: list, report: dict) -> None:
             r.load_state_bytes(zlib.decompress(sf.read_bytes()), record=False)
             pc = GBAState(env=r.env).u8(PARTY_COUNT_ADDR)
             if pc > 1:
+                # Wally tutorial exemption: his Zigzagoon rides the player's party
+                # for the scripted gym scene. No wild encounters exist in gyms, so
+                # a gym sample with party==2 is the tutorial, not a catch.
+                if "GYM" in str(r.nav_state().map or "").upper():
+                    continue
                 bad.append((sf.name, int(pc)))
     finally:
         r.close()
