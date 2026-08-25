@@ -147,6 +147,10 @@ def force_fight(runner, max_rounds: int = 500) -> bool:
     menu) and then presses A, which also advances battle text. That is enough to play
     a battle to its end, win or faint — and a faint whites us out to a Center with a
     full heal, which the grind block already treats as its heal."""
+    from collection.battle_driver import drive_battle, enabled as _bv2
+    if _bv2():
+        drive_battle(runner, src="force_fight_v2")
+        return not runner.nav_state().in_battle
     # DO NOT STEER when the lead holds a keeper move. Measured directly: ten slow A
     # presses through a level-up leave [24,45,116,52] intact, but the UP+LEFT steer
     # walks the "which move should be forgotten?" cursor onto slot 1 — Double Kick —

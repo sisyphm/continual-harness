@@ -331,6 +331,13 @@ def _battle_protected(runner, rounds: int = 160) -> None:
     So watch the level between rounds: the moment it ticks up, answer with B (which
     declines the swap) before resuming the steer.
     """
+    from collection.battle_driver import drive_battle, enabled as _bv2
+    if _bv2():
+        # v2 (W34): cursor-verified presses cannot walk the forget-cursor, and
+        # move_keeper owns the prompt itself — the level-watch below is the blind
+        # steer's compensation, unnecessary when no stray A can reach that cursor.
+        drive_battle(runner, src="battle_protected_v2")
+        return
     from collection import navigator as _nav
     from collection.extractors.ram import GBAState as _GS
     from collection.extractors.ledger_panel import _battle_mon as _bm
