@@ -57,7 +57,12 @@ class PPUDeltaWriter:
             kind, payload = b"K", blob
         else:
             kind, payload = b"D", np.bitwise_xor(blob, self.prev)
-        comp = zlib.compress(payload.tobytes(), 6)
+        # W34 speed: level 6 on every frame was 72% of the whole per-frame budget
+        # (3.45 ms vs 0.64 ms of emulator) — the recorder compressed 5x longer than
+        # the game played. Deltas go level 1 (0.82 ms, sparse XOR compresses fine);
+        # keyframes keep 6 (1-in-300, they carry the size). Measured on 1,500 real
+        # records: 4.2x faster, ~2.6 vs 1.2 KB/frame before keyframe amortization.
+        comp = zlib.compress(payload.tobytes(), 6 if kind == b"K" else 1)
         off = self.f.tell()
         self.f.write(kind + len(comp).to_bytes(4, "little") + comp)
         self.index.append([frame_idx, off, kind.decode()])
