@@ -37,9 +37,11 @@ ROM = "Emerald-GBAdvance/rom.gba"
 
 # Long transitions get bigger budgets, not exclusions. PETALBURG_WOODS (Aqua-grunt
 # sequence + woods traverse) and ROXANNE_BATTLE (the full gym) failed EVERY recorded
-# sweep — including every committed baseline — under the default caps, while
-# production runs pass them routinely: the sweep's caps were the defect. Values are
-# (max_wall_s -> frame budget at x500, subprocess timeout s).
+# sweep including all baselines; the budgets below removed the wall-kill disguise and
+# exposed the REAL defect — their predecessors' fixture files held title-screen
+# states (see `refixture`, which earns a replacement). Budgets stay generous because
+# the transitions are genuinely long. Values are (max_wall_s -> frame budget at
+# x500, subprocess timeout s).
 LONG_TRANSITIONS: dict[str, tuple[float, int]] = {
     "PETALBURG_WOODS": (480.0, 1200),
     "ROXANNE_BATTLE": (480.0, 1200),
@@ -61,8 +63,7 @@ def run_one(frm: str, tgt: str) -> dict:
         if tgt not in events:
             raise RuntimeError(f"no heatz event for {tgt}")
         runner = DirectEmulatorRunner(
-            rom_path=ROM, load_state=f"{POLICY}/{frm}/{frm}_completed.state",
-            story_bucket=tgt, savestate_every=0)
+            rom_path=ROM, load_state=fixture_path(frm), story_bucket=tgt, savestate_every=0)
         runner.initialize()
         exp = ce._load_expected_state(
             rom_path=ROM, completed_state=events[tgt].get("completed_state"), event_id=tgt)
@@ -89,6 +90,57 @@ def run_one(frm: str, tgt: str) -> dict:
 def _worker_main(frm: str, tgt: str) -> None:
     res = run_one(frm, tgt)
     print("RESULT " + json.dumps(res), flush=True)
+
+
+FIXTURE_OVERRIDES = HARN / "data" / "fixtures"
+
+
+def fixture_path(m: str) -> str:
+    """The expert `_completed.state` for milestone m — preferring a repaired override
+    from data/fixtures/ over the (read-only, sometimes broken) policy-dir asset."""
+    o = FIXTURE_OVERRIDES / f"{m}_completed.state"
+    return str(o) if o.exists() else f"{POLICY}/{m}/{m}_completed.state"
+
+
+def refixture(tgt: str) -> int:
+    """Repair a broken `<TGT>_completed.state` by EARNING it: run the predecessor's
+    fixture through the TGT transition and save the runner's end state on PASS.
+
+    Exists because ROUTE_104_SOUTH and TRAINER_JOSH_BATTLE's fixtures held TITLE-
+    SCREEN states (probed W34) — every sweep in history stalled from action zero on
+    the transitions that START there, disguised as timeouts by the old wall caps.
+    The policy dir is upstream's and is never touched: repairs land in
+    data/fixtures/, which fixture_path() prefers.
+    """
+    import collection.collect_events as ce
+    from collection.catalog import MILESTONE_ORDER, discover_heatz_events
+    from collection.direct_runner import DirectEmulatorRunner
+    from collection.playthrough.spine import run_milestone
+
+    frm = MILESTONE_ORDER[MILESTONE_ORDER.index(tgt) - 1]
+    ce.set_expected_starter("Mudkip")
+    events = {e["event_id"]: e for e in discover_heatz_events(POLICY)}
+    runner = DirectEmulatorRunner(
+        rom_path=ROM, load_state=fixture_path(frm), story_bucket=tgt, savestate_every=0)
+    runner.initialize()
+    exp = ce._load_expected_state(
+        rom_path=ROM, completed_state=events[tgt].get("completed_state"), event_id=tgt)
+    r = run_milestone(
+        runner, event_id=tgt, policy_dir=POLICY, expected_state=exp,
+        postcondition=events[tgt].get("postcondition", tgt), start_money=0,
+        starter="mudkip", max_actions=8000,
+        max_wall_s=LONG_TRANSITIONS.get(tgt, DEFAULT_BUDGET)[0])
+    if r["validation"] not in ("passed", "skipped"):
+        print(f"refixture {tgt}: transition FAILED ({r.get('failure_reason')}) — no override written")
+        runner.close()
+        return 1
+    sb = runner.save_state_bytes()
+    runner.close()
+    FIXTURE_OVERRIDES.mkdir(parents=True, exist_ok=True)
+    dst = FIXTURE_OVERRIDES / f"{tgt}_completed.state"
+    dst.write_bytes(sb)
+    print(f"refixture {tgt}: PASSED from {frm}, override written {dst} ({len(sb)} bytes)")
+    return 0
 
 
 def _spawn_one(args: tuple) -> dict:
@@ -168,6 +220,8 @@ def main() -> int:
     o = sub.add_parser("one")
     o.add_argument("frm")
     o.add_argument("tgt")
+    rf = sub.add_parser("refixture")
+    rf.add_argument("tgt")
     s = sub.add_parser("sweep")
     s.add_argument("--workers", type=int, default=10)
     s.add_argument("--limit", type=int, default=0)
@@ -181,6 +235,8 @@ def main() -> int:
     if args.op == "one":
         _worker_main(args.frm, args.tgt)
         return 0
+    if args.op == "refixture":
+        return refixture(args.tgt)
     if args.op == "sweep":
         env = dict(kv.split("=", 1) for kv in args.env)
         out = HARN / "data" / "milestone_lab" / stamp / f"{args.tag}.jsonl"
