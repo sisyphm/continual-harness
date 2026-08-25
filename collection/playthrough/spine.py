@@ -184,22 +184,16 @@ def _flee_wild_if_critical(runner, floor: float = 0.30) -> bool:
             return False
     except Exception:
         return False                                  # unreadable -> leave it alone
-    for _ in range(6):                                # "Couldn't escape!" is possible
-        if not runner.nav_state().in_battle:
-            return True
-        # B FIRST. The caller may be anywhere in the battle UI, not necessarily at the
-        # action menu: a dry lead sits on the MOVE list under "There's no PP left for
-        # this move!", where LEFT/UP/RIGHT/DOWN walk the move cursor and never reach
-        # RUN (measured — the flee silently no-opped and the battle stayed wedged for
-        # 37,502 frames). B backs out of a submenu or dismisses the message; from the
-        # action menu it is harmless.
-        # Then home the cursor on FIGHT (LEFT+UP) before walking it to RUN at
-        # bottom-right: the cursor keeps wherever a previous press left it, so a bare
-        # RIGHT+DOWN lands somewhere different every time.
-        for _k in ("B", "B", "LEFT", "UP", "RIGHT", "DOWN", "A"):
-            runner.perform_action(_k, metadata={"src": "flee_critical"})
-        _nav._hold(runner, [], 30, "spine")
-    return not runner.nav_state().in_battle
+    # Cursor-verified RUN (W34). The old blind cycle here — B,B,LEFT,UP,RIGHT,DOWN,A
+    # fired at an unknown UI state — is how rg_020 CAUGHT a Poochyena: presses eaten
+    # by transitions left the A to land on BAG -> ball -> a second party mon, which
+    # voided the single-mon invariant and turned a later faint into an unanswerable
+    # "Choose a POKeMON." wedge (850k frames). drive_battle presses A only when the
+    # controller says a menu awaits AND the cursor is verified on RUN; busy states
+    # get B only, so no stray press can ever reach the bag.
+    from collection.battle_driver import drive_battle
+    out = drive_battle(runner, mode="flee", src="flee_critical")
+    return out["result"] in ("fled", "win", "whiteout", "ended")
 
 
 # Route 104 is ONE map id with TWO disjoint walkable halves, joined only through

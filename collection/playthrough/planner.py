@@ -38,6 +38,76 @@ STAGE_WINDOWS = {
     "S4c_rustboro": ["RUSTBORO_CITY", "RUSTBORO_CENTER_EXITED", "HEAL_AT_RUSTBORO_CENTER"],
 }
 SLICE_TILES = 45            # target tiles per sweep entry (tour ~35 f/tile with B-dash)
+
+# Where each schedulable window leaves the player (overworld map key). Used to pick
+# the NEAREST window for a slice and to price its travel — wave 1's 0,30 slice was
+# anchored at EXIT_PETALBURG_GYM, five maps from its tiles, and died en route on a
+# flat budget that priced travel at zero.
+WINDOW_MAP = {
+    "LEAVE_HOUSE": "0,9", "RIVAL_HOUSE": "0,9",
+    "ROUTE_101": "0,16", "OLDALE_TOWN": "0,10", "ROUTE_103": "0,18",
+    "BACK_TO_OLDALE_FROM_ROUTE103": "0,10", "OLDALE_AFTER_POKEDEX": "0,10",
+    "ROUTE101_AFTER_POKEDEX": "0,16", "ROUTE_102": "0,17", "PETALBURG_CITY": "0,0",
+    "EXIT_PETALBURG_GYM": "0,0", "PETALBURG_WOODS": "24,11",
+    "ROUTE_104_NORTH": "0,19", "ROUTE_104_SOUTH": "0,19",
+    "RUSTBORO_CITY": "0,3", "RUSTBORO_CENTER_EXITED": "0,3",
+    "HEAL_AT_RUSTBORO_CENTER": "0,3",
+}
+
+# Maps with land wild encounters: sweeping them pays an encounter tax (measured
+# wave 1: each mid-sweep flee costs ~450-800 frames and grass maps drew one every
+# handful of tiles — 9,000 flat covered 5-26 of 45-90 assigned tiles).
+ENCOUNTER_MAPS = {"0,16", "0,17", "0,18", "0,19", "0,30", "0,31", "24,11"}
+
+
+def _map_hops(world, a: str, b: str, _cache={}) -> int:
+    """Map-graph BFS distance (connections + warps) between "g,n" keys; 9 if apart."""
+    if a == b:
+        return 0
+    if (a, b) in _cache:
+        return _cache[(a, b)]
+    def norm(k):
+        return k.replace("g", "").replace("_n", ",")
+    adj = _cache.get("_adj")
+    if adj is None:
+        adj = {}
+        for key, d in world.maps.items():
+            src = norm(key)
+            outs = set()
+            for _, _, dkey in d.get("_conn", ()):
+                if dkey:
+                    outs.add(norm(dkey))
+            for w in d.get("_warps", ()) or ():
+                # (x, y, dst_key, warp_id) tuples in the frozen world data
+                dm = w[2] if isinstance(w, (tuple, list)) and len(w) > 2 else None
+                if dm:
+                    outs.add(norm(dm))
+            adj[src] = outs
+        _cache["_adj"] = adj
+    seen, frontier = {a}, [a]
+    for hops in range(1, 9):
+        nxt = []
+        for k in frontier:
+            for o in adj.get(k, ()):
+                if o == b:
+                    _cache[(a, b)] = hops
+                    return hops
+                if o not in seen:
+                    seen.add(o)
+                    nxt.append(o)
+        frontier = nxt
+    _cache[(a, b)] = 9
+    return 9
+
+
+def sweep_budget(world, window: str, gkey: str, n_tiles: int) -> int:
+    """Priced BACKSTOP (owner ruling, W34): completion terminates a sweep; this
+    budget only ends one when an unknown defect keeps it from completing, so it is
+    3x the honest cost model — travel hops + per-tile touring + encounter tax —
+    never a flat constant. Floor keeps small nearby slices at the proven 9,000."""
+    hops = _map_hops(world, WINDOW_MAP.get(window, "0,0"), gkey)
+    tax = 500 * n_tiles if gkey in ENCOUNTER_MAPS else 0
+    return max(9000, 3 * (hops * 3000 + n_tiles * 60 + tax))
 LEG_QUOTA = 5               # fleet-wide crossings per direction per connection pair
 N_RUNS_PER_STARTER = 20     # 60 slots for 50 targets (17/17/16 + failure margin)
 
@@ -189,12 +259,16 @@ def build_plan(seed0: int = 20260825) -> dict:
                     use_wins = wins
             else:
                 use_wins = wins
+            # NEAREST window, not a random one (W34): rng.choice was geography-blind
+            # and priced nothing — 0,30 anchored five maps out and swept zero tiles.
+            win = min(use_wins, key=lambda w: _map_hops(world, WINDOW_MAP.get(w, "0,0"), gkey))
             for i in range(0, len(pure), SLICE_TILES):
                 run = runs[ri % len(runs)]; ri += 1
+                chunk = pure[i:i + SLICE_TILES]
                 run["block_schedule"].append([
-                    rng.choice(use_wins), "bfs_sweep",
-                    {"maps": [gkey], "tiles": {gkey: [list(t) for t in pure[i:i + SLICE_TILES]]},
-                     "per_map_frames": 9000}])
+                    win, "bfs_sweep",
+                    {"maps": [gkey], "tiles": {gkey: [list(t) for t in chunk]},
+                     "per_map_frames": sweep_budget(world, win, gkey, len(chunk))}])
     # --- warp legs: in-scope connection pairs x LEG_QUOTA runs (block does both dirs)
     pairs = set()
     for key, d in world.maps.items():
@@ -237,8 +311,14 @@ def build_plan(seed0: int = 20260825) -> dict:
         s = run["seed"]
         run["block_schedule"] += [
             ["PETALBURG_CITY", "interaction", {"frames": 45000, "maps": [towns[i % 3]], "seed": s % 7001}],
+            # mart_buy wants a TOWN OVERWORLD key (it scans the town's warps for the
+            # gfx==83 clerk); pc_access wants the Center 1F interior. Wave 1 passed
+            # the Center key to BOTH, so all mart blocks aborted "no mart behind any
+            # town warp". want= buys Repel x3 + Potion x2 (verified live, delta-true);
+            # sell=False or the sell leg liquidates the Repels it just bought.
             ["RUSTBORO_CENTER_EXITED", "mart_buy" if i % 2 else "pc_access",
-             ({"towns": ["11,5"], "frames": 30000} if i % 2 else {"center": "11,5", "frames": 20000})],
+             ({"towns": ["0,3"], "frames": 30000, "want": [(86, 3), (13, 2)], "sell": False}
+              if i % 2 else {"center": "11,5", "frames": 20000})],
             ["OLDALE_TOWN", "menus", {"frames": 6000, "seed": s % 7919}],
             ["ROUTE_103", "idle", {}],
         ]

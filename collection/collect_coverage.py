@@ -31,12 +31,10 @@ DIRS = ("UP", "DOWN", "LEFT", "RIGHT")
 
 
 def _flee_battle(runner, max_actions: int = 40) -> bool:
-    """Escape a wild battle (RUN = bottom-right, then confirm)."""
-    for _ in range(max_actions):
-        for act in ("B", "DOWN", "RIGHT", "A"):
-            runner.perform_action(act, speed="fast", record_end_state=False)
-        if not runner.nav_state().in_battle:
-            return True
+    """Escape a wild battle via the cursor-verified RUN (W34; the blind cycle this
+    replaced could land its A on BAG and catch — see collection/battle_driver.py)."""
+    from collection.battle_driver import drive_battle
+    drive_battle(runner, mode="flee", src="coverage_flee")
     return not runner.nav_state().in_battle
 
 

@@ -37,9 +37,20 @@ def ball_throw_blocked(runner) -> bool:
         # Cheap RAM read first; nav_state() is comparatively expensive and this runs
         # before every action, so it is only consulted once the bag is actually up.
         if st.u32(CB2_ADDR) != CB2_BAG:
+            # STICKY WINDOW (W34). The exact-CB2 check has a race: while the bag task
+            # is opening or closing, CB2 reads a transitional callback for a few
+            # frames during which the bag is already (still) interactive — and wave 1
+            # proved the race is real at scale: five runs caught 1-4 wild mons each
+            # THROUGH this guard, every throw confirmed by an A that hit the flip
+            # window. Once the battle bag has been seen, A stays rewritten for 120
+            # frames after CB2 leaves it.
+            seen = getattr(runner, "_battle_bag_seen_frame", None)
+            if seen is not None and runner.frame_idx - seen < 120:
+                return not bool(getattr(runner, "allow_battle_bag", False))
             return False
         if not runner.nav_state().in_battle:
             return False                      # overworld bag is legitimate behaviour
+        runner._battle_bag_seen_frame = runner.frame_idx
         # POCKET-BLIND ON PURPOSE. The first version refused A only on pocket 1, and a
         # run still caught a Whismur: "JAXSON used POKe BALL!" at frame 553,176 of
         # exp_001, straight out of a wild battle the walk had wandered into. Whatever

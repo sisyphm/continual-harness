@@ -583,6 +583,16 @@ def _npc_blocked_tiles(env: Any, exclude_xy: tuple[int, int] | None = None) -> l
         return []
 
 
+# Consecutive no-path memo (W34): callers loop find_path_action against a goal they
+# never re-validate, so an unreachable goal used to re-run A* + a greedy walk on
+# EVERY call — the wave-1 interaction block burned its whole 45k budget orbiting a
+# walled cell, and nav spent 27 rounds shouldering an off-map (-1,13). Three
+# consecutive failures from the SAME tile toward the SAME goal short-circuit to
+# no_op; any successful path or any player movement clears the key (an NPC walking
+# off CAN open a goal, so the verdict is per-position, never permanent).
+_NOPATH_MEMO: dict[tuple, int] = {}
+
+
 def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fallback: bool = False, max_distance: int = 150, extra_blocked: list[tuple[int, int]] | None = None) -> str:
     if is_dialog_open(state):
         return "a"
@@ -608,6 +618,11 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
             return "a"
         return adjacent_action
 
+    _map = (state.get("map") or {}).get("id") or state.get("map_id")
+    _memo_key = (_map, goal_x, goal_y, x, y)
+    if _NOPATH_MEMO.get(_memo_key, 0) >= 3:
+        return "no_op"                    # convicted from this tile; let the caller's
+                                          # own iteration caps end the attempt cheaply
     try:
         from utils.mapping.pathfinding import Pathfinder
 
@@ -620,9 +635,12 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
             blocked_coords=blocked or None,
         )
         if path:
+            _NOPATH_MEMO.pop(_memo_key, None)
             return str(path[0]).lower()
+        _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
     except Exception as exc:
         logger.debug("Pathfinding failed: %s", exc)
+        _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
 
     # Greedy fallback toward the goal, then any escape, skipping NPC tiles.
     prefs: list[str] = []

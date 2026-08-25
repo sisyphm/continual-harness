@@ -236,7 +236,14 @@ class BfsSweep:
                        connections_failed=[], battles_fled=0,
                        unreached_maps=[], budget_expired_maps=[], frames=0)
         f0 = runner.frame_idx
-        deadline = f0 + self.frames                  # whole-block budget (see __init__)
+        # Enter grass work healthy (W34): sweeps on encounter maps eat chip damage
+        # before each flee, and a low lead entering a long sweep is how attrition
+        # wedges start. One check per block, BEFORE the budget clock starts — the
+        # trip must never starve the sweep it protects.
+        from collection.playthrough.heal import ensure_healthy
+        if ensure_healthy(runner, mk, src="bfs_sweep_heal") == "heal_failed":
+            summary["heal_failed"] = True            # loud, but sweep what we can
+        deadline = runner.frame_idx + self.frames    # whole-block budget (see __init__)
         for key in self.maps:
             budget_left = deadline - runner.frame_idx
             if budget_left <= 0:

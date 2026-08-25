@@ -93,7 +93,12 @@ def walk_to(runner, mk, cells, *, phase: str, budget: int = 8000) -> str:
         if src is None:
             src = (t.map_group, t.map_num)
         elif (t.map_group, t.map_num) != src:
-            nav._hold(runner, [], 60, phase)                  # door/mat fired mid-walk
+            # 120f, not 60 (W34): after a mart door fires, the player coords stay the
+            # OVERWORLD door tile for ~90 frames. Every follow-up walk then BFS'd from
+            # an off-buffer origin and returned "stuck" — counter approach, exit, and
+            # anchor return all failed on the stale read (verified live: the identical
+            # block runs clean end-to-end with the longer settle, purchases delta-true).
+            nav._hold(runner, [], 120, phase)                 # door/mat fired mid-walk
             return "crossed"
         if (x, y) in cells:
             return "arrived"

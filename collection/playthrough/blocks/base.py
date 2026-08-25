@@ -42,13 +42,20 @@ def _settle_for_block(runner, *, max_actions: int = 60):
             break
         h = _hstate(runner)
         if st.in_battle:
-            runner.perform_action(normalize_action(handle_battle(h, strategy="run")),
-                                  metadata={"src": "block_settle"})
+            # Cursor-verified flee (W34) — the heatz "run" strategy here was another
+            # blind battle-menu cycle, the same family that caught rg_020's Poochyena.
+            from collection.battle_driver import drive_battle
+            drive_battle(runner, mode="flee", src="block_settle")
         elif is_dialog_open(h):
             runner.perform_action(normalize_action(navigate_ui(h, intent="confirm")),
                                   metadata={"src": "block_settle"})
         else:
-            for _ in range(4):
+            # Script tail: no battle, no dialog, control not free — a post-milestone
+            # cutscene can hold control for thousands of frames, and the old 4-frame
+            # idle × 60 gave up after 240 (wave 1: a whole trainer_engagement block —
+            # three targets — skipped on precondition_not_overworld exactly this way).
+            # Wait in 40-frame beats; max_actions bounds the total.
+            for _ in range(40):
                 runner.step_frame([], phase="block_settle")
         st = runner.state()
     return st
@@ -124,13 +131,15 @@ _BLOCK_BUDGET_SLACK = 2_048
 
 
 def flee_battle(runner, max_actions: int = 40) -> bool:
-    """Escape a wild battle (RUN = bottom-right, then confirm) — collect_coverage's
-    proven `_flee_battle` pattern, local so blocks don't import the coverage collector."""
-    for _ in range(max_actions):
-        for act in ("B", "DOWN", "RIGHT", "A"):
-            runner.perform_action(act, speed="fast", record_end_state=False)
-        if not runner.nav_state().in_battle:
-            return True
+    """Escape a wild battle via the cursor-verified RUN (W34).
+
+    The old blind cycle (B, DOWN, RIGHT, A fired at an unknown UI state) is the
+    pattern that CAUGHT a Poochyena on rg_020 — an A eaten by a transition landed
+    on BAG and bought its way to a second party mon, voiding the single-mon
+    invariant. drive_battle(mode="flee") confirms RUN only with the cursor read
+    back on it and answers everything else with B, so no press can reach the bag."""
+    from collection.battle_driver import drive_battle
+    out = drive_battle(runner, mode="flee", src="flee_battle")
     return not runner.nav_state().in_battle
 
 

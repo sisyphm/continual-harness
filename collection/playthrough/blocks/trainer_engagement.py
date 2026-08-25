@@ -173,15 +173,24 @@ class TrainerEngagement:
             nav._clear_dialog(runner, self.phase)
 
     def _lead_ok(self, runner, summary) -> bool:
-        """grind_evolve's heal policy: abort-with-reason instead of risking a
-        whiteout mid-block; the spine's heal logic owns recovery."""
+        """HEAL, don't abort (W34, owner ruling). The old abort-with-reason dropped
+        every remaining target the moment HP dipped — wave 1 lost three Route 116
+        trainers to `lead_hp_low` while a Center sat two maps away. A nurse trip is
+        deterministic and cheap (~2x travel + ~800 frames); abort only when the trip
+        itself fails, and say so."""
         lead = read_lead(runner)
         if lead is None:
             summary["ended"] = "no_lead"
             return False
         if lead["max_hp"] and lead["hp"] / lead["max_hp"] < self.hp_floor:
-            summary["ended"] = "lead_hp_low"
-            return False
+            from collection.playthrough.heal import ensure_healthy
+            from collection import navigator as _navmod
+            r = ensure_healthy(runner, _navmod.MapKnowledge(),
+                               hp_floor=self.hp_floor, src=f"{self.name}_heal")
+            summary["heals"] = summary.get("heals", 0) + (1 if r == "healed" else 0)
+            if r == "heal_failed":
+                summary["ended"] = "heal_failed"
+                return False
         return True
 
     def _ensure_map(self, runner, mk, key: str, rng, summary) -> bool:
@@ -304,7 +313,16 @@ class TrainerEngagement:
             le = near(o, live.get(o["local_id"]))
             return (le.x, le.y) if le is not None else (o["x"], o["y"])
 
-        for attempt in range(_ATTEMPTS):
+        # PRODUCTIVE-ROUND counting (W34). `for attempt in range(_ATTEMPTS)` let
+        # non-productive rounds eat the whole allowance: James (flag 1901) sits past
+        # the Devon-researcher cutscene trigger, whose script lock returns "stuck"
+        # (~850f) and whose grunt fight returns "battle" — four such rounds and the
+        # block quit 31 tiles from a perfectly engageable trainer, in EVERY fleet
+        # run anchored at (26,24). Replayed with this rule: James engaged on round 5
+        # at 12.3k of the block's 60k frames. Only a round that actually reached a
+        # talk/gaze attempt counts; the frame deadline stays the hard stop.
+        attempt = 0
+        while attempt < _ATTEMPTS:
             if runner.frame_idx >= self._deadline:
                 self._skip(summary, flag, key, "block frame budget expired")
                 return
@@ -333,9 +351,14 @@ class TrainerEngagement:
                 self._record_flips(runner, summary)
                 if flag in self._engaged_flags:
                     return
-                continue                             # wild/other trainer: re-target
+                continue                             # en-route battle: no attempt spent
             if r != "arrived":
-                if attempt < _ATTEMPTS - 1:
+                from collection.playthrough.blocks.interaction import _dialog_open_live
+                if _dialog_open_live(runner):        # script lock / cutscene tail owns
+                    nav._clear_dialog(runner, self.phase)   # the map: resolve, retry
+                    continue                         # free — the world just changed
+                attempt += 1
+                if attempt < _ATTEMPTS:
                     nav._hold(runner, [], _RETRY_WAIT, self.phase)   # blocker wanders off
                 continue
             nav._hold(runner, [], 45, self.phase)    # in the sightline now: give the

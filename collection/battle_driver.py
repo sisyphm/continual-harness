@@ -50,8 +50,12 @@ CTRL_ACTION_READY = 0x08057589      # HandleInputChooseAction (thumb)
 CTRL_MOVE_READY = 0x08057BFD        # HandleInputChooseMove (thumb)
 
 # The action menu is a 2x2 grid: FIGHT(0) BAG(1) / POKeMON(2) RUN(3). One corrective
-# press per iteration, toward FIGHT; the re-read next iteration verifies it landed.
-_ACTION_STEP = {1: "LEFT", 2: "UP", 3: "UP"}
+# press per iteration, toward the target; the re-read next iteration verifies it
+# landed. Neither route ever passes THROUGH BAG's confirm — a stray A on BAG is how
+# rg_020 caught a Poochyena (blind flee cycle, W34 wave 1) and broke the single-mon
+# party invariant the whole trainer policy rests on.
+_ACTION_STEP = {1: "LEFT", 2: "UP", 3: "UP"}          # toward FIGHT(0)
+_ACTION_STEP_RUN = {0: "DOWN", 1: "DOWN", 2: "RIGHT"}  # toward RUN(3)
 
 
 def _battle_lead_foe(runner):
@@ -77,18 +81,26 @@ def _best_move_slot(runner) -> int:
     return 0 if i is None else i
 
 
-def drive_battle(runner, *, budget_frames: int = 120_000, src: str = "battle_v2") -> dict:
+def drive_battle(runner, *, mode: str = "fight", budget_frames: int = 120_000,
+                 src: str = "battle_v2") -> dict:
     """Play the current battle to its end. Returns an outcome dict:
 
-        result   win | whiteout | ended | timeout | not_in_battle
+        result   win | whiteout | fled | ended | timeout | not_in_battle
         frames   emulator frames consumed
-        presses  {"A": n, "B": n, "cursor": n}
+        presses  {"A": n, "A_busy": n, "B": n, "cursor": n}
         moves    move-menu confirms per slot index
 
-    'ended' = battle over but neither HP was seen at zero (both reads are best-effort);
-    'timeout' = frame budget exhausted while still in battle — the caller's stall
-    machinery owns what happens next. Never presses RUN, never opens the party menu,
-    so a finished trainer battle is a won one unless we whited out.
+    mode="fight": cursor-verified FIGHT + best move every round.
+    mode="flee" (wild only — callers gate on _is_trainer_battle): cursor-verified
+    RUN; the move menu gets B (back out), busy states get B ONLY — a flee never
+    needs a stray A, and stray A's are how the blind flee cycle bought a Poke Ball
+    and caught a second party mon (rg_020, W34). "Couldn't escape!" just returns
+    the action menu, so RUN retries naturally; after 8 refused confirms the driver
+    falls back to fighting, which also ends the battle.
+
+    'ended' = battle over but neither HP was seen at zero (both reads are
+    best-effort); 'timeout' = frame budget exhausted while still in battle — the
+    caller's stall machinery owns what happens next. Never opens the party menu.
     """
     from collection import navigator as _nav
     from collection.extractors.ram import GBAState
@@ -97,6 +109,8 @@ def drive_battle(runner, *, budget_frames: int = 120_000, src: str = "battle_v2"
     presses = {"A": 0, "A_busy": 0, "B": 0, "cursor": 0}
     moves: dict[int, int] = {}
     foe_zero = me_zero = False
+    fleeing = mode == "flee"
+    run_confirms = 0
 
     if not runner.nav_state().in_battle:
         return {"result": "not_in_battle", "frames": 0, "presses": presses, "moves": moves}
@@ -115,14 +129,24 @@ def drive_battle(runner, *, budget_frames: int = 120_000, src: str = "battle_v2"
             if me and me.get("hp") == 0:
                 me_zero = True
             acur = st.u8(G_ACTION_CURSOR)
-            if acur == 0:
+            if fleeing and run_confirms >= 8:
+                fleeing = False           # escape keeps failing: win it instead
+            target_pos = 3 if fleeing else 0
+            if acur == target_pos:
                 runner.perform_action("A", metadata={"src": src}, record_end_state=False)
                 presses["A"] += 1
+                if fleeing:
+                    run_confirms += 1
             else:
-                runner.perform_action(_ACTION_STEP.get(acur, "UP"),
-                                      metadata={"src": src}, record_end_state=False)
+                step = (_ACTION_STEP_RUN if fleeing else _ACTION_STEP).get(acur, "UP")
+                runner.perform_action(step, metadata={"src": src}, record_end_state=False)
                 presses["cursor"] += 1
         elif ctrl0 == CTRL_MOVE_READY:
+            if fleeing:
+                # Flee wants the ACTION menu; B backs out of the move list.
+                runner.perform_action("B", metadata={"src": src}, record_end_state=False)
+                presses["B"] += 1
+                continue
             target = _best_move_slot(runner)
             mcur = st.u8(G_MOVE_CURSOR)
             if mcur == target:
@@ -149,7 +173,10 @@ def drive_battle(runner, *, budget_frames: int = 120_000, src: str = "battle_v2"
             # the action cursor anywhere but FIGHT — so an A racing a menu-open can
             # at worst enter the move menu, which the next iteration handles.
             busy = presses["B"] + presses["A_busy"]
-            key = "A" if busy % 4 == 3 else "B"
+            # Flee mode is B-ONLY: nothing in a wild flee ever needs A ("Got away
+            # safely!" and "Couldn't escape!" both advance on B), and the periodic
+            # A exists solely for trainer-END text, which a flee never reaches.
+            key = "A" if (not fleeing and busy % 4 == 3) else "B"
             runner.perform_action(key, metadata={"src": src}, record_end_state=False)
             presses["A_busy" if key == "A" else "B"] += 1
             _nav._hold(runner, [], 10, src)
@@ -170,6 +197,8 @@ def drive_battle(runner, *, budget_frames: int = 120_000, src: str = "battle_v2"
             result = "whiteout"
         elif foe_zero:
             result = "win"
+        elif mode == "flee":
+            result = "fled"
         else:
             result = "ended"
     return {"result": result, "frames": runner.frame_idx - f0,

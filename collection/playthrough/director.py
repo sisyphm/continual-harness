@@ -390,8 +390,20 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
             import threading, json as _json, os as _os2
 
             def _stall_watch(r=runner, outdir=str(out)):
+                # Three tripwires (W34):
+                #   frozen   — frame counter stuck 150s (the original: emulator wedged)
+                #   semantic — frames FLOW but nothing happens: in_battle constant True
+                #              at a constant position for 60k+ frames. Wave 1's B-loop
+                #              wedge burned 850k frames this way and the frozen check,
+                #              watching only frame_idx, saw a perfectly lively run.
+                #   party    — gPlayerPartyCount != 1. The whole trainer/flee/whiteout
+                #              policy rests on the single-mon invariant; a catch is a
+                #              run-invalidating defect and must fail AT the catch, not
+                #              an hour later in an unexplainable battle wedge.
                 last, since = -1, 0
-                while True:
+                sem_key, sem_frames = None, 0
+                party_bad = 0                             # double-confirm: a poll racing
+                while True:                               # a state load can read torn
                     import time as _t
                     _t.sleep(10)
                     f = r.frame_idx
@@ -400,12 +412,43 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                         if since >= 150:                 # 150s frozen under direct
                             try:                          # record = genuinely wedged
                                 Path(outdir, "STALL.json").write_text(_json.dumps(
-                                    {"frame_idx": f, "at": _t.time()}))
+                                    {"frame_idx": f, "kind": "frozen", "at": _t.time()}))
                             finally:
                                 print(f"STALL-EXIT frame={f}", flush=True)
                                 _os2._exit(86)
-                    else:
+                        continue
+                    try:
+                        from collection.extractors.ram import GBAState as _GS
+                        st = _GS(env=r.env)
+                        pc = st.u8(0x020244E9)           # gPlayerPartyCount
+                        n = r.nav_state()
+                        key = (bool(n.in_battle), n.map, n.x, n.y)
+                    except Exception:
                         last, since = f, 0
+                        continue                          # mid-transition reads throw
+                    party_bad = party_bad + 1 if pc not in (0, 1) else 0
+                    if party_bad >= 2:                    # 0 = pre-starter boot
+                        try:
+                            Path(outdir, "STALL.json").write_text(_json.dumps(
+                                {"frame_idx": f, "kind": "party_violation",
+                                 "party_count": int(pc), "at": _t.time()}))
+                        finally:
+                            print(f"PARTY-EXIT frame={f} count={pc}", flush=True)
+                            _os2._exit(87)
+                    if key[0] and key == sem_key:
+                        sem_frames += f - last
+                        if sem_frames >= 60_000:
+                            try:
+                                Path(outdir, "STALL.json").write_text(_json.dumps(
+                                    {"frame_idx": f, "kind": "semantic",
+                                     "pos": list(key[1:]), "in_battle": True,
+                                     "stuck_frames": sem_frames, "at": _t.time()}))
+                            finally:
+                                print(f"SEMANTIC-STALL-EXIT frame={f} key={key}", flush=True)
+                                _os2._exit(86)
+                    else:
+                        sem_key, sem_frames = key, 0
+                    last, since = f, 0
 
             threading.Thread(target=_stall_watch, daemon=True).start()
         if sink is not None:
