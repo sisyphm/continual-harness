@@ -91,7 +91,14 @@ class DirectEmulatorRunner:
             if self.savestate_every:
                 self._save_periodic_state()
 
-    def initialize(self) -> None:
+    def initialize(self, *, record_initial_frame: bool = True) -> None:
+        """Boot the emulator (and, when recording, pin provenance + the restore ledger).
+
+        `record_initial_frame=False` skips the frame-0 state/visual row: a RESUMED run
+        (W33 §3.4 stitch) re-boots the emulator only to throw the boot state away at the
+        seam, and that title-screen frame would be an extra visual row with no action
+        row in the middle of the stream — a hidden frame by the gate's provenance rule.
+        """
         from pokemon_env.emulator import EmeraldEmulator
 
         self.env = EmeraldEmulator(rom_path=self.rom_path)
@@ -112,7 +119,8 @@ class DirectEmulatorRunner:
         if self.load_state:
             self.env.load_state(self.load_state)
         self.frame_idx = 0
-        self.record_current_frame(phase="initial")
+        if record_initial_frame:
+            self.record_current_frame(phase="initial")
 
     def close(self) -> None:
         if self.env is not None:

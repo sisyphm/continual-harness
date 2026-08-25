@@ -34,11 +34,19 @@ def deserialize_ppu(blob: bytes) -> dict:
 class PPUDeltaWriter:
     """Per-frame PPU state as keyframe + XOR-delta (zlib). >99% static => tiny."""
 
-    def __init__(self, path: Path, keyframe_interval: int = 300):
-        self.f = open(path, "wb")
+    def __init__(self, path: Path, keyframe_interval: int = 300, resume: bool = False):
+        # RESUME (W33 §3.4): append to a stream truncated by resume_stitch. The XOR
+        # chain cannot cross the seam (`prev` belongs to the frames that were cut), so
+        # the first appended record is FORCED to be a keyframe — which `prev is None`
+        # already guarantees, and `n = 0` keeps the interval counting from the seam.
+        self.f = open(path, "ab" if resume else "wb")
         self.index: list = []
+        if resume:
+            idx = Path(str(path) + ".idx.json")
+            if idx.exists():
+                self.index = json.loads(idx.read_text()).get("frames", [])
         self.kfi = keyframe_interval
-        self.prev = None
+        self.prev = None                       # -> forced keyframe on the first add()
         self.n = 0
         self.bytes_written = 0
 
@@ -86,12 +94,18 @@ class LedgerWriter:
     flushed as `ledger/chunk_%06d.npz` every `chunk_frames` (+ partial on close) with an
     `index.json` schema so consumers never re-derive dtypes/shapes from the arrays."""
 
-    def __init__(self, out_dir: str | Path, chunk_frames: int = 4096):
+    def __init__(self, out_dir: str | Path, chunk_frames: int = 4096, resume: bool = False):
         self.dir = Path(out_dir)
         self.dir.mkdir(parents=True, exist_ok=True)
         self.chunk_frames = chunk_frames
         self.chunks: list = []                  # [filename, start_row, n_rows]
         self.total = 0
+        if resume and (self.dir / "index.json").exists():
+            # continue the truncated ledger: new chunk names follow len(self.chunks),
+            # and close() must not clobber the prefix's index with an empty one
+            old = json.loads((self.dir / "index.json").read_text())
+            self.chunks = old.get("chunks", [])
+            self.total = int(old.get("frames", 0))
         self._frame_idx: list[int] = []
         self._rows: dict[str, list] = {name: [] for name in LEDGER_FIELDS}
 
@@ -135,16 +149,35 @@ class LedgerWriter:
 class WorldModelSink:
     """Attach as `runner.frame_hook`: captures full PPU + semantic + ledger per real frame."""
 
-    def __init__(self, output_dir: str | Path, keyframe_interval: int = 300):
+    def __init__(self, output_dir: str | Path, keyframe_interval: int = 300,
+                 resume: dict | str | Path | None = None):
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        self.ppu = PPUDeltaWriter(out / "ppu_state.bin", keyframe_interval)
-        self.sem = (out / "semantic.jsonl").open("w", buffering=1)
-        self.ledger = LedgerWriter(out / "ledger")
+        # RESUME/STITCH: append to the channels rewound by resume_stitch.prepare_resume
+        # (ppu stream + index, semantic.jsonl, ledger chunks) instead of truncating them.
+        self.resume = None
+        if resume is not None:
+            from collection.resume_stitch import load_resume
+
+            self.resume = load_resume(resume)
+        self.ppu = PPUDeltaWriter(out / "ppu_state.bin", keyframe_interval,
+                                  resume=bool(self.resume))
+        self.sem = (out / "semantic.jsonl").open("a" if self.resume else "w", buffering=1)
+        self.ledger = LedgerWriter(out / "ledger", resume=bool(self.resume))
         self.frames = 0
 
     def capture(self, runner) -> None:
+        # W33 root-cause knobs: same-seed v1 (no sink) passed the rival house, v2
+        # (slim sink) wedged -- capture_mode lets a differential pin which component:
+        #   full (default) | ppu-only (no entities/semantic) | sem-only (no blob)
         env = runner.env
+        mode = getattr(self, "capture_mode", "full")
+        if mode == "sem-only":
+            nav = runner.nav_state()
+            self.sem.write(json.dumps({"frame": runner.frame_idx, "x": nav.x, "y": nav.y,
+                                       "map": nav.map, "in_battle": nav.in_battle}) + "\n")
+            self.frames += 1
+            return
         ppu = extract_full_ppu_state(env)
         blob = serialize_ppu(ppu)                # serialized ONCE, shared by both writers
         self.ppu.add(runner.frame_idx, ppu, blob=blob)
@@ -159,6 +192,9 @@ class WorldModelSink:
             # ledger reads the SAME captured blob (not the live env): row == stored
             # frame by construction, with the io/vram blocks the window-mask needs.
             self.ledger.add(runner.frame_idx, read_ledger(GBAState.from_blob(blob)))
+        if mode == "ppu-only":
+            self.frames += 1
+            return
         nav = runner.nav_state()
         # objects + facing via the VALIDATED extractor (extractors.entities over the live seam).
         # Runs recorded before 2026-06 carry the legacy garbage objects and input-tracker facing

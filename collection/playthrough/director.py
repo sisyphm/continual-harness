@@ -303,6 +303,7 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     persona: dict | None = None, max_attempts: int = 5,
                     resume_state: str | None = None,
                     resume_after: str | None = None,
+                    resume: dict | str | None = None,
                     savestate_every: int = 4000) -> dict:
     """...
 
@@ -312,7 +313,14 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
     one-line fix — it should carry on from just before where it broke. The seam is
     recorded in the manifest (resumed_from / resume_frame / resume_after) because a
     resumed run is frames A..B from one build and B..C from another, and that has to
-    be visible to anything that reads the corpus rather than inferred later."""
+    be visible to anything that reads the corpus rather than inferred later.
+
+    STITCH (W33 §3.4): passing `resume` — the handshake dict/path written by
+    collection.resume_stitch.prepare_resume, whose `savestate` IS `resume_state` —
+    makes the tail APPEND to the rewound recording instead of opening a fresh one:
+    recorder and sink continue the prefix's channels and counters, and the runner
+    continues its FRAME NUMBERING from the cut (`frame_idx = cut_frame`), so the
+    finished directory is one continuous, gate-valid stream instead of two runs."""
     from collection.playthrough.schedule import build_expedition_schedule, build_schedule
     from collection.playthrough.blocks.base import run_block, run_nav_block
     out = Path(out_dir)
@@ -330,10 +338,18 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
     by_id = {e["event_id"]: e for e in events}
     order = [m for m in MILESTONE_ORDER if m in by_id]  # skip GAME_RUNNING (no policy row)
 
+    resume_cfg = None
+    if resume is not None:
+        from collection.resume_stitch import load_resume
+
+        resume_cfg = load_resume(resume)
+        if resume_state is None:
+            resume_state = resume_cfg["savestate"]
     recorder_cm = ChunkRecorder(str(out), run_id=f"playthrough_{starter}_s{seed}",
                                 visual_fps=1000 if record else 30, backend="npz",
                                 metadata={"kind": "playthrough", "starter": starter, "seed": seed,
-                                          "persona": persona_cfg})
+                                          "persona": persona_cfg},
+                                resume=resume_cfg if record else None)
     results = []
     aborted_milestone = None
     t_run = time.time()
@@ -345,7 +361,14 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         runner = DirectEmulatorRunner(rom_path=rom_path, load_state=None,
                                       recorder=recorder if record else None,
                                       savestate_every=savestate_every)
-        runner.initialize()
+        stitching = resume_cfg is not None and record
+        if stitching:
+            # initialize() re-points manifest["restores"] at the runner's log, so the
+            # prefix's restores (and the seam entry the recorder just appended) have to
+            # be IN that log or they are dropped from the manifest.
+            runner.restore_log.extend(recorder.manifest.get("restores") or [])
+        # the boot frame of a resumed run is thrown away at the seam: never record it
+        runner.initialize(record_initial_frame=not stitching)
         if record:
             # W33 §14.4 persona plumbing: the persona is a first-class manifest field
             recorder.manifest["persona"] = persona_cfg
@@ -357,7 +380,8 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         # exp_052, all 28 fields, 6.7k frames/sec). W33_FAST_RECORD=1 detaches it.
         import os as _os
         _fast = _os.environ.get("W33_FAST_RECORD") == "1"
-        sink = WorldModelSink(str(out)) if (record and _os.environ.get("W33_NO_SINK") != "1") else None
+        sink = (WorldModelSink(str(out), resume=resume_cfg)
+                if (record and _os.environ.get("W33_NO_SINK") != "1") else None)
         if sink is not None and _fast:
             sink.skip_ledger = True      # blobs + semantic always; labels offline
         if sink is not None:
@@ -390,8 +414,18 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         if resume_state:
             import zlib
             raw = open(resume_state, "rb").read()
+            if resume_cfg is not None:
+                # STITCH: continue the prefix's frame numbering. Without this every
+                # index the tail writes (action frame_idx, ppu frame, savestate name)
+                # restarts at 0 in the middle of the stream.
+                runner.frame_idx = int(resume_cfg["cut_frame"])
             runner.load_state_bytes(zlib.decompress(raw) if resume_state.endswith(".z") else raw,
                                     record=True)
+            if stitching:
+                # the seam restore is already logged (ChunkRecorder's resume entry);
+                # a second recorded restore would claim a frame that does not exist
+                # and break the gate's visual == actions + 1 + recorded_restores rule
+                runner.restore_log.pop()
             for _ in range(60):
                 runner.step_frame([], phase="resume")
             if record:
@@ -478,6 +512,8 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                    # so say plainly how many were inherited and where the prefix lives.
                    resumed_from=resume_state,
                    resume_after=resume_after,
+                   resume_cut_frame=(resume_cfg or {}).get("cut_frame"),
+                   stitched=resume_cfg is not None,
                    milestones_inherited=sum(
                        1 for r in results if r.get("failure_reason") == "resumed_past"),
                    recording_is_end_to_end=not bool(resume_state),

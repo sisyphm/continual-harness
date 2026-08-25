@@ -34,6 +34,7 @@ class ChunkRecorder:
         backend: str = "auto",
         max_chunk_visual_frames: int = 10_000,
         metadata: dict[str, Any] | None = None,
+        resume: dict | str | Path | None = None,
     ):
         self.output_dir = Path(output_dir)
         self.chunks_dir = self.output_dir / "chunks"
@@ -55,14 +56,26 @@ class ChunkRecorder:
         self.backend = backend
         self.ffmpeg_path = ffmpeg_path
 
-        self.frames_file = (self.output_dir / "frames.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.actions_file = (self.output_dir / "actions.jsonl").open("w", encoding="utf-8", buffering=1)
+        # RESUME/STITCH (W33 §3.4): with a resume handshake from
+        # collection.resume_stitch.prepare_resume the recorder APPENDS to a rewound
+        # recording instead of starting one — every channel opens "a", the counters
+        # continue where the truncated prefix stopped, and the existing manifest
+        # (restores / persona / provenance / metadata) is kept rather than rewritten.
+        self.resume = None
+        if resume is not None:
+            from collection.resume_stitch import load_resume
+
+            self.resume = load_resume(resume)
+        mode = "a" if self.resume else "w"
+
+        self.frames_file = (self.output_dir / "frames.jsonl").open(mode, encoding="utf-8", buffering=1)
+        self.actions_file = (self.output_dir / "actions.jsonl").open(mode, encoding="utf-8", buffering=1)
         # phase transitions live in their OWN stream (spec §2): actions.jsonl stays
         # homogeneous — every row is an action row (consumers index buttons_held etc.)
-        self.phases_file = (self.output_dir / "phases.jsonl").open("w", encoding="utf-8", buffering=1)
+        self.phases_file = (self.output_dir / "phases.jsonl").open(mode, encoding="utf-8", buffering=1)
         # states/segments are unconditional (spec §3.7)
-        self.states_file = (self.output_dir / "states.jsonl").open("w", encoding="utf-8", buffering=1)
-        self.segments_file = (self.output_dir / "segments.jsonl").open("w", encoding="utf-8", buffering=1)
+        self.states_file = (self.output_dir / "states.jsonl").open(mode, encoding="utf-8", buffering=1)
+        self.segments_file = (self.output_dir / "segments.jsonl").open(mode, encoding="utf-8", buffering=1)
         self.manifest_path = self.output_dir / "manifest.json"
 
         self.chunk_index = 0
@@ -89,7 +102,51 @@ class ChunkRecorder:
             "status": "running",
             "metadata": json_safe(self.metadata),
         }
+        if self.resume:
+            self._restore_from(self.resume)
         self._write_manifest()
+
+    def _restore_from(self, cfg: dict[str, Any]) -> None:
+        """Continue a rewound recording: counters, chunk numbering and manifest."""
+        cut = int(cfg["cut_frame"])
+        self.chunk_index = int(cfg["chunk_index"])          # next chunk is this + 1
+        self.visual_frame_idx = int(cfg["visual_count"])    # next visual_frame_idx
+        self.chunk_visual_frame_idx = 0                     # boundary chunk is sealed
+        self.last_visual_emulator_frame = cut
+        # subsampling clock: the next frame at/after the seam is the next kept one
+        self._next_visual_at = float(cut)
+        old = json.loads(self.manifest_path.read_text()) if self.manifest_path.exists() else {}
+        if old:
+            fresh, self.manifest = self.manifest, old
+            if old.get("backend") not in (None, fresh["backend"]):
+                raise ValueError(
+                    f"resume backend mismatch: recording is {old.get('backend')!r}, "
+                    f"this recorder is {fresh['backend']!r}")
+            # keep restores / persona / provenance / metadata / started_at from the
+            # prefix; only the live-run fields are refreshed
+            self.manifest["status"] = "running"
+            self.manifest["run_id"] = fresh["run_id"]
+            self.manifest["visual_fps"] = fresh["visual_fps"]
+            self.manifest["max_chunk_visual_frames"] = fresh["max_chunk_visual_frames"]
+        self.manifest.setdefault("restores", [])
+        # The seam frame: the resumed director restores the savestate as a RECORDED
+        # restore, so one visual frame at the seam carries no action row. That entry is
+        # logged HERE (the director suppresses the runner's duplicate) — the gate's
+        # provenance rule counts recorded restores, so exactly one may exist per seam.
+        self.manifest["restores"].append({"frame_idx": cut, "recorded": True, "resume": True,
+                                          "savestate": cfg.get("savestate")})
+        # a resumed run is frames A..B from one build and B..C from another: say so
+        self.manifest.setdefault("resume_segments", []).append({
+            "cut_frame": cut,
+            "savestate": cfg.get("savestate"),
+            "visual_count": cfg.get("visual_count"),
+            "actions_count": cfg.get("actions_count"),
+            "chunk_index": cfg.get("chunk_index"),
+            "resumed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            # initialize() overwrites the top-level provenance with the resuming
+            # build's; the prefix's is kept here so the seam stays auditable
+            "prefix_provenance": self.manifest.get("provenance"),
+        })
 
     def _write_manifest(self) -> None:
         tmp = self.manifest_path.with_suffix(".json.tmp")
