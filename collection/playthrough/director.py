@@ -176,6 +176,8 @@ def solve_then_record_milestone(
     # sampled replay spot-checks in the verify battery instead of per-milestone 2x.
     import os as _os
     if _os.environ.get("W33_DIRECT_RECORD") == "1" and runner.recorder is not None:
+        if _os.environ.get("W33_DIAG") == "1":
+            max_attempts = 1                      # diagnostic: first verdict is THE verdict
         for attempt in range(max_attempts):
             k = k0 + attempt * JITTER_PER_ATTEMPT
             telemetry["attempts"] += 1
@@ -355,9 +357,11 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         # exp_052, all 28 fields, 6.7k frames/sec). W33_FAST_RECORD=1 detaches it.
         import os as _os
         _fast = _os.environ.get("W33_FAST_RECORD") == "1"
-        sink = WorldModelSink(str(out)) if record else None
+        sink = WorldModelSink(str(out)) if (record and _os.environ.get("W33_NO_SINK") != "1") else None
         if sink is not None and _fast:
             sink.skip_ledger = True      # blobs + semantic always; labels offline
+        if sink is not None:
+            sink.capture_mode = _os.environ.get("W33_CAPTURE_MODE", "full")
         if _os.environ.get("W33_DIRECT_RECORD") == "1":
             import threading, json as _json, os as _os2
 

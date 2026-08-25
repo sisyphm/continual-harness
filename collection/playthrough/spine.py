@@ -422,7 +422,28 @@ def run_milestone(
     wall-clock terms. Breaching the cap fails the attempt like a stall; the
     solve-then-record retry/abort machinery above stays in charge."""
     policy = HeatzPolicy(event_id, Path(policy_dir) / event_id / f"{event_id}.py")
-    t_start = time.monotonic()
+    # SPEED-INVARIANT BUDGETS: wall-clock decisions made the policy play a
+    # DIFFERENT GAME at different fps (A/B-proven: same seed, sink-off sailed,
+    # sink-on wedged). Budgets now count GAME FRAMES (125 f/s converts the old
+    # seconds semantics); same seed -> same buttons at any speed/load/recording.
+    t_start = time.monotonic()                      # telemetry only
+    # Conversion preserves the MOST GENEROUS historical equivalent: the old 480 wall-
+    # seconds at the no-sink ~300 fps ceiling = 144k frames. The first constant (125,
+    # the slim-sink fleet rate) silently HALVED budgets for fast configs and killed
+    # the scene-heavy house exit at 60k frames -- convicted by bisect, not by theory.
+    budget_frames = int(max_wall_s * 500) if max_wall_s else 0
+    # x500, not a "conversion": old wall budgets spanned 4-10x in frame terms across
+    # configs (that variance WAS the bug). Frame budgets must exceed the worst
+    # LEGITIMATE game need -- EXIT_RIVAL_HOUSE's entry-scene fixture needs ~85k frames
+    # (measured, 40 actions); 240s-callers now get 120k. Generous bounds cost nothing
+    # on passes; diagnostics use W33_DIAG (/8).
+    # W33_DIAG=1: the DIAGNOSTIC profile (stack charter law 5). Verdicts are the
+    # deliverable, not resilience: budgets /8 so a FAILING probe answers in ~1-2 min
+    # instead of 10+. Never set on collection runs.
+    import os as _osd
+    if _osd.environ.get("W33_DIAG") == "1":
+        budget_frames //= 8
+    budget_f0 = runner.frame_idx
     start_frame = runner.frame_idx
     start_state = runner.state()
     validation = "failed"
@@ -462,7 +483,7 @@ def run_milestone(
     accept_unresponsive_target = event_id in ce._EVENTS_ACCEPTING_UNRESPONSIVE_TARGET
     _crossed_once = False                 # off-map recovery fires at most once per attempt
     _reanchored = False                   # whiteout re-anchor also fires at most once
-    _wedge_t, _wedge_f = time.monotonic(), start_frame   # rolling wedge window
+    _wedge_t, _wedge_f = 0, start_frame   # rolling wedge window
     _rival_ready = False                  # levelled AND healed for the Route 103 rival
     _nurse_done = False                   # counter-talk heal fires at most once
     _last_pos = None                      # position-based stall signal (survives dry solves)
@@ -492,8 +513,8 @@ def run_milestone(
                     actions_taken=0, start_frame=start_frame, end_frame=runner.frame_idx)
 
     for _ in range(max_actions):
-        if max_wall_s and time.monotonic() - t_start > max_wall_s:
-            failure_reason = "wall_time_exceeded"
+        if budget_frames and runner.frame_idx - budget_f0 > budget_frames:
+            failure_reason = "wall_time_exceeded"   # name kept for monitors/audits
             break
         # FRAME-RATE COLLAPSE = wedged. A healthy milestone steps thousands of frames
         # per second; a wedged one crawls, because every iteration replans a route it
@@ -512,10 +533,10 @@ def run_milestone(
         # hours with delta=38,419 -- far over the 2000 threshold -- while stepping zero
         # frames. Measure a rolling window instead, so a late stall is caught the same
         # as an early one.
-        _now = time.monotonic()
-        if _now - _wedge_t > 90.0:
+        _wedge_t += 1                                # iterations, not seconds
+        if _wedge_t >= 1800:                         # ~= old 90s at typical iter rate
             _wedge_stalled = (runner.frame_idx - _wedge_f) < 2000
-            _wedge_t, _wedge_f = _now, runner.frame_idx
+            _wedge_t, _wedge_f = 0, runner.frame_idx
         else:
             _wedge_stalled = False
         if _wedge_stalled:
@@ -525,7 +546,7 @@ def run_milestone(
             # dies correctly.
             if not _reanchored and _reanchor_to_expected(runner, expected_state):
                 _reanchored = True
-                t_start = time.monotonic()
+                budget_f0 = runner.frame_idx
                 start_frame = runner.frame_idx
                 _recent.clear()
                 continue

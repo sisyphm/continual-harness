@@ -304,6 +304,17 @@ def _grind_target(event_id: str | None, current) -> int | None:
     return None
 
 
+_SEM_WORLD = None
+
+
+def _semantic_world():
+    global _SEM_WORLD
+    if _SEM_WORLD is None:
+        from collection.audits.reachability import World
+        _SEM_WORLD = World()
+    return _SEM_WORLD
+
+
 def _semantic_postcondition_met(event_id: str | None, runner: DirectEmulatorRunner, current, start_money: int = 0) -> bool:
     if event_id == "STARTER_CHOSEN":
         # Done the moment we hold Mudkip and are back in overworld control after the
@@ -387,6 +398,27 @@ def _postcondition_met(
         # The starter pick is only complete when we actually hold Mudkip; a wrong
         # starter (e.g. Torchic) must fail loudly instead of passing on position alone.
         return False
+    # W33 regen root-cause (pilot v2, all six wedged): the intro-house milestones
+    # passed POSITIONALLY while the house's story state machine was mid-scene --
+    # VAR_LITTLEROOT_HOUSES_STATE_* stuck at 1 arms the YoureNewNeighbor ON_FRAME
+    # script, which then re-fires every frame in the rival's house: input locked,
+    # door warp suppressed, EXIT_RIVAL_HOUSE unwinnable (81k mashed frames never
+    # recovered -- the wedged state is unrecoverable, so entry must be prevented).
+    # Position is not story state: these events additionally require the greet
+    # scene to have RESOLVED (var != 1; it is 0 before entry, 1 only mid-scene).
+    if event_id in ("RIVAL_HOUSE", "GO_DOWNSTAIRS_RIVAL_HOUSE", "RIVAL_BEDROOM",
+                    "EXIT_RIVAL_HOUSE"):
+        try:
+            from collection.audits.reachability import World, state_readers
+            from collection.extractors.ram import GBAState
+            _w = _semantic_world()
+            _, vg = state_readers(GBAState(env=runner.env))
+            for _v in ("VAR_LITTLEROOT_HOUSES_STATE_BRENDAN",
+                       "VAR_LITTLEROOT_HOUSES_STATE_MAY"):
+                if vg(_w.vars[_v]) == 1:
+                    return False                    # greet scene pending/mid-flight
+        except Exception:
+            pass                                    # unreadable state: fall through
     if _semantic_postcondition_met(event_id, runner, current, start_money):
         return True
     if event_id in _SEMANTIC_ONLY_EVENTS:
