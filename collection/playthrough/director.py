@@ -165,6 +165,44 @@ def solve_then_record_milestone(
     telemetry: dict = {"attempts": 0, "jitters": [], "dry_frames_wasted": 0,
                        "dry_frames_solve": 0, "replay_frames": 0}
     result: dict = {}
+    # W33 DIRECT-RECORD (owner 08-25: "collection has to be clean: full speed, best
+    # policy, stalls detected fast"). The dry+replay 2x tax was scaffolding for a
+    # fragile policy; with the fix stack + trainer-routed plan the first attempt
+    # succeeds ~99% of the time, so: record LIVE, single execution. On the rare
+    # failure, restore the milestone snapshot as a LOGGED RECORDED restore (gate
+    # provenance already accepts these) and append the failed span to the manifest's
+    # blemish_spans -- the packaging stage excises those spans offline, which keeps
+    # the TRAINING corpus clean without recorder surgery. Determinism stays proven by
+    # sampled replay spot-checks in the verify battery instead of per-milestone 2x.
+    import os as _os
+    if _os.environ.get("W33_DIRECT_RECORD") == "1" and runner.recorder is not None:
+        for attempt in range(max_attempts):
+            k = k0 + attempt * JITTER_PER_ATTEMPT
+            telemetry["attempts"] += 1
+            telemetry["jitters"].append(k)
+            fa = runner.frame_idx
+            for _ in range(k):
+                runner.step_frame([], phase="milestone_jitter",
+                                  metadata={"event_id": event_id, "attempt": attempt})
+            result = run_milestone(
+                runner, event_id=event_id, policy_dir=policy_dir,
+                expected_state=expected_state, postcondition=postcondition,
+                start_money=start_money, starter=starter, tic_fn=tic_fn,
+                max_actions=max_actions)
+            if result["validation"] in ("passed", "skipped"):
+                break
+            span = [fa, runner.frame_idx]
+            runner.load_state_bytes(snap, record=True)      # logged, recorded restore
+            runner.facing = facing0
+            runner.recorder.manifest.setdefault("blemish_spans", []).append(
+                {"event_id": event_id, "attempt": attempt, "span": span,
+                 "reason": result.get("failure_reason")})
+            runner.recorder._write_manifest()
+        else:
+            result["failed_persistent"] = True
+        result["retry"] = telemetry
+        return result
+
     for attempt in range(max_attempts):
         k = k0 + attempt * JITTER_PER_ATTEMPT
         telemetry["attempts"] += 1
@@ -318,6 +356,28 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         import os as _os
         _fast = _os.environ.get("W33_FAST_RECORD") == "1"
         sink = WorldModelSink(str(out)) if (record and not _fast) else None
+        if _os.environ.get("W33_DIRECT_RECORD") == "1":
+            import threading, json as _json, os as _os2
+
+            def _stall_watch(r=runner, outdir=str(out)):
+                last, since = -1, 0
+                while True:
+                    import time as _t
+                    _t.sleep(10)
+                    f = r.frame_idx
+                    if f == last:
+                        since += 10
+                        if since >= 150:                 # 150s frozen under direct
+                            try:                          # record = genuinely wedged
+                                Path(outdir, "STALL.json").write_text(_json.dumps(
+                                    {"frame_idx": f, "at": _t.time()}))
+                            finally:
+                                print(f"STALL-EXIT frame={f}", flush=True)
+                                _os2._exit(86)
+                    else:
+                        last, since = f, 0
+
+            threading.Thread(target=_stall_watch, daemon=True).start()
         if sink is not None:
             runner.frame_hook = sink.capture
         # Boot past the title screen: mash A/START until GAME_RUNNING (new game begins).
