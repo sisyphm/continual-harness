@@ -118,7 +118,7 @@ def needs_heal(runner, *, hp_floor: float = 0.35) -> bool:
         return False
 
 
-def ensure_healthy(runner, mk, *, hp_floor: float = 0.35, trip_frames: int = 60_000,
+def ensure_healthy(runner, mk, *, hp_floor: float = 0.35, trip_frames: int = 12_000,
                    src: str = "ensure_healthy") -> str:
     """'healthy' (no trip needed) | 'healed' (trip succeeded) | 'heal_failed'.
 

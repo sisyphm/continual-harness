@@ -49,7 +49,7 @@ WINDOW_MAP = {
     "BACK_TO_OLDALE_FROM_ROUTE103": "0,10", "OLDALE_AFTER_POKEDEX": "0,10",
     "ROUTE101_AFTER_POKEDEX": "0,16", "ROUTE_102": "0,17", "PETALBURG_CITY": "0,0",
     "EXIT_PETALBURG_GYM": "0,0", "PETALBURG_WOODS": "24,11",
-    "ROUTE_104_NORTH": "0,19", "ROUTE_104_SOUTH": "0,19",
+    "ROUTE_104_NORTH": "0,19N", "ROUTE_104_SOUTH": "0,19S",
     "RUSTBORO_CITY": "0,3", "RUSTBORO_CENTER_EXITED": "0,3",
     "HEAL_AT_RUSTBORO_CENTER": "0,3",
 }
@@ -60,8 +60,22 @@ WINDOW_MAP = {
 ENCOUNTER_MAPS = {"0,16", "0,17", "0,18", "0,19", "0,30", "0,31", "24,11"}
 
 
+def seam_key(gkey: str, tiles=None) -> str:
+    """Route 104 ("0,19") is ONE map id with TWO disjoint halves joined only through
+    Petalburg Woods (the spine's seam). Pricing it as one node made C-group budgets
+    lie (W34 measured: 104N->Petalburg priced 1 hop, real path is N->woods->S->town).
+    Tiles with mean y < 40 are the north half."""
+    if gkey != "0,19":
+        return gkey
+    if tiles:
+        ys = [t[1] for t in tiles]
+        return "0,19N" if sum(ys) / len(ys) < 40 else "0,19S"
+    return "0,19S"
+
+
 def _map_hops(world, a: str, b: str, _cache={}) -> int:
-    """Map-graph BFS distance (connections + warps) between "g,n" keys; 9 if apart."""
+    """Map-graph BFS distance (connections + warps) between "g,n" keys; 9 if apart.
+    Seam-aware: "0,19N"/"0,19S" are distinct nodes joined only via 24,11."""
     if a == b:
         return 0
     if (a, b) in _cache:
@@ -83,6 +97,19 @@ def _map_hops(world, a: str, b: str, _cache={}) -> int:
                 if dm:
                     outs.add(norm(dm))
             adj[src] = outs
+        # split the Route 104 seam: N touches Rustboro's side (0,3-adjacent nodes),
+        # S touches Petalburg (0,0); both reach the woods (24,11). Every other
+        # node's edge to "0,19" is rewritten to the half it physically touches.
+        n_side, s_side = {"0,3", "0,30", "0,31"}, {"0,0"}
+        adj["0,19N"] = {"24,11"} | {k for k in adj.get("0,19", ()) if k in n_side}
+        adj["0,19S"] = {"24,11"} | {k for k in adj.get("0,19", ()) if k in s_side}
+        adj.pop("0,19", None)
+        for k, outs in adj.items():
+            if "0,19" in outs:
+                outs.discard("0,19")
+                outs.add("0,19N" if k in n_side or k == "24,11" else "0,19S")
+                if k == "24,11":
+                    outs.add("0,19S")
         _cache["_adj"] = adj
     seen, frontier = {a}, [a]
     for hops in range(1, 9):
@@ -100,14 +127,29 @@ def _map_hops(world, a: str, b: str, _cache={}) -> int:
     return 9
 
 
-def sweep_budget(world, window: str, gkey: str, n_tiles: int) -> int:
-    """Priced BACKSTOP (owner ruling, W34): completion terminates a sweep; this
-    budget only ends one when an unknown defect keeps it from completing, so it is
-    3x the honest cost model — travel hops + per-tile touring + encounter tax —
-    never a flat constant. Floor keeps small nearby slices at the proven 9,000."""
-    hops = _map_hops(world, WINDOW_MAP.get(window, "0,0"), gkey)
-    tax = 500 * n_tiles if gkey in ENCOUNTER_MAPS else 0
-    return max(9000, 3 * (hops * 3000 + n_tiles * 60 + tax))
+def sweep_budget(world, window: str, gkey: str, n_tiles: int, tiles=None) -> int:
+    """Priced BACKSTOP, W34 re-priced from 99 measured receipts (six audited runs):
+    non-grass p90 = 100 f/tile (median 45); open grass p90 adds ~650; Petalburg
+    Woods measured >=1,725 f/tile (dense encounters) -> 2,000 tax; hops ~2,500 when
+    routable. +12,000 = the capped heal reserve (heals were priced at ZERO and were
+    the dominant unmodelled cost — 7.9-9k per honest trip). 2x honest = backstop."""
+    src = seam_key(WINDOW_MAP.get(window, "0,0"))
+    dst = seam_key(gkey, tiles)
+    hops = _map_hops(world, src, dst)
+    tax = 2000 if gkey == "24,11" else (650 if gkey in ENCOUNTER_MAPS else 0)
+    honest = hops * 2500 + n_tiles * 100 + n_tiles * tax
+    return max(12_000, 2 * honest + 12_000)
+def interaction_budget(world, window: str, town_key: str) -> int:
+    """W34 measured: ~800-1,060 frames per enumerated object locally; travel was
+    entirely unpriced (both Rustboro-from-Petalburg interactions spent all 45,000
+    frames travelling and enumerated zero objects)."""
+    g, n = town_key.split(",")
+    d = world.maps.get(f"g{g}_n{n}") or {}
+    n_obj = len(d.get("object_events") or []) + len(d.get("bg_events") or [])
+    hops = _map_hops(world, seam_key(WINDOW_MAP.get(window, "0,0")), seam_key(town_key))
+    return max(20_000, 2 * (hops * 2500 + 1200 * max(4, n_obj)))
+
+
 LEG_QUOTA = 5               # fleet-wide crossings per direction per connection pair
 N_RUNS_PER_STARTER = 20     # 60 slots for 50 targets (17/17/16 + failure margin)
 
@@ -255,20 +297,23 @@ def build_plan(seed0: int = 20260825) -> dict:
                                 else ["EXIT_PETALBURG_GYM", "PETALBURG_WOODS"])
                 elif folder == "PetalburgWoods":
                     use_wins = ["PETALBURG_WOODS"]
+                elif folder == "Route115":
+                    use_wins = ["RUSTBORO_CITY", "RUSTBORO_CENTER_EXITED"]
                 else:
                     use_wins = wins
             else:
                 use_wins = wins
             # NEAREST window, not a random one (W34): rng.choice was geography-blind
             # and priced nothing — 0,30 anchored five maps out and swept zero tiles.
-            win = min(use_wins, key=lambda w: _map_hops(world, WINDOW_MAP.get(w, "0,0"), gkey))
+            win = min(use_wins, key=lambda w: _map_hops(world, seam_key(WINDOW_MAP.get(w, "0,0")),
+                                            seam_key(gkey, pure)))
             for i in range(0, len(pure), SLICE_TILES):
                 run = runs[ri % len(runs)]; ri += 1
                 chunk = pure[i:i + SLICE_TILES]
                 run["block_schedule"].append([
                     win, "bfs_sweep",
                     {"maps": [gkey], "tiles": {gkey: [list(t) for t in chunk]},
-                     "per_map_frames": sweep_budget(world, win, gkey, len(chunk))}])
+                     "per_map_frames": sweep_budget(world, win, gkey, len(chunk), chunk)}])
     # --- warp legs: in-scope connection pairs x LEG_QUOTA runs (block does both dirs)
     pairs = set()
     for key, d in world.maps.items():
@@ -299,18 +344,20 @@ def build_plan(seed0: int = 20260825) -> dict:
                 ts = sorted(ts, key=lambda t: t["rock"])       # non-rock first, then Geodudes
                 run["block_schedule"].append([                 # 160-EXP top-off BEFORE rocks
                     "ROUTE_104_NORTH", "encounter_farm",
-                    {"frames": 12000, "seed": run["seed"] % 99991,
+                    {"frames": 48000, "seed": run["seed"] % 99991,
                      "targets": [{"area": "land", "map": "0,31", "species_targets": {}}]}])
             run["block_schedule"].append([
                 w, "trainer_engagement",
-                {"frames": 30000 + 12000 * len(ts), "seed": run["seed"] % 99991,
+                {"frames": 20000 + 14000 * len(ts), "seed": run["seed"] % 99991,
                  "targets": [{"map": t["map"], "trainer_flag": t["flag"]} for t in ts]}])
     # --- floor blocks (interaction/mart/pc/menus/idle), seeded rotation like the banked plan
     towns = ["0,10", "0,0", "0,3"]
     for i, run in enumerate(runs):
         s = run["seed"]
         run["block_schedule"] += [
-            ["PETALBURG_CITY", "interaction", {"frames": 45000, "maps": [towns[i % 3]], "seed": s % 7001}],
+            ["PETALBURG_CITY", "interaction",
+             {"frames": interaction_budget(world, "PETALBURG_CITY", towns[i % 3]),
+              "maps": [towns[i % 3]], "seed": s % 7001}],
             # mart_buy wants a TOWN OVERWORLD key (it scans the town's warps for the
             # gfx==83 clerk); pc_access wants the Center 1F interior. Wave 1 passed
             # the Center key to BOTH, so all mart blocks aborted "no mart behind any

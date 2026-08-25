@@ -95,7 +95,10 @@ SPINE_TRAINER_FLAGS: dict[int, str] = {
 
 _ATTEMPTS = 4                      # bounded goto/talk rounds per target (trainer_hunt)
 _MAX_LOSSES = 2                 # losses tolerated before the block stops trying
-_RETURN_RESERVE = 40_000        # frames held back so the walk home always fits
+# min(15k, frames//5), not 40k flat (W34 measured): the flat reserve left a
+# 66,000 budget only 33,000 of work and skipped 2/4 Route-102 trainers while
+# 38,572 priced frames sat unused; measured walk-home never exceeded ~8k.
+_RETURN_RESERVE = 40_000        # legacy name; see _reserve()
 _RETRY_WAIT = 240                  # frames between rounds: let a wanderer move on
 
 
@@ -186,6 +189,7 @@ class TrainerEngagement:
             from collection.playthrough.heal import ensure_healthy
             from collection import navigator as _navmod
             r = ensure_healthy(runner, _navmod.MapKnowledge(),
+                               trip_frames=max(4_000, min(12_000, self._deadline - runner.frame_idx)),
                                hp_floor=self.hp_floor, src=f"{self.name}_heal")
             summary["heals"] = summary.get("heals", 0) + (1 if r == "healed" else 0)
             if r == "heal_failed":
@@ -427,7 +431,7 @@ class TrainerEngagement:
         # anchor return fails off-map, which REWINDS the world: a sweep that won
         # three trainers had all three flags flipped back to unset (measured, and
         # its own XP with them). Engaging until the last frame guarantees that.
-        self._deadline = f0 + max(self.frames - _RETURN_RESERVE, self.frames // 2)
+        self._deadline = f0 + self.frames - min(15_000, self.frames // 5)
         self._watch = set(TRACKED_TRAINER_FLAGS) | {
             int(t["trainer_flag"]) for t in self.targets}
         self._flag_state = self._watch_set(runner)
