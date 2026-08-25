@@ -64,11 +64,22 @@ class PPUDeltaWriter:
         self.bytes_written += len(comp) + 5
         self.prev = blob
         self.n += 1
+        # W34: a killed run used to lose the block-buffered bin tail AND the whole
+        # index (close-only write) — resume_stitch then had to rescan the stream.
+        # Flush the bin every record (one syscall against an emulator frame; noise)
+        # and snapshot the index every 10k frames, so a SIGKILL costs at most 10k
+        # frames of INDEX (the data itself is on disk) and zero bytes of stream.
+        self.f.flush()
+        if self.n % 10_000 == 0:
+            self._write_index()
+
+    def _write_index(self) -> None:
+        Path(self.f.name + ".idx.json").write_text(
+            json.dumps({"block_sizes": BLOCK_SIZES, "frames": self.index}))
 
     def close(self) -> None:
-        name = self.f.name
+        self._write_index()
         self.f.close()
-        Path(name + ".idx.json").write_text(json.dumps({"block_sizes": BLOCK_SIZES, "frames": self.index}))
 
 
 def extract_objects_v0_legacy(env) -> list:
