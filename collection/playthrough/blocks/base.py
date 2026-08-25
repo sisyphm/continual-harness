@@ -68,9 +68,26 @@ def run_block(runner, block, *, max_actions: int = 900) -> dict:  # rescaled for
     # Settle: the spine may hand off on a script tail (a "skipped/already-complete"
     # milestone) and an earlier block may have left a battle/dialog. Active, bounded.
     st0 = _settle_for_block(runner)
-    if st0.in_battle or is_dialog_open(_hstate(runner)) or st0.control_mode != "free_overworld":
+    if st0.in_battle or is_dialog_open(_hstate(runner)):
         return dict(block=block.name, ran=False, reason="precondition_not_overworld",
                     frames=runner.frame_idx - start_frame, actions=0)
+    if st0.control_mode != "free_overworld":
+        # control_mode is POSITION-POISONED near script triggers (measured, W34:
+        # Route 104 (39,63) reads 'dialogue' indefinitely while the player moves
+        # freely in all four directions — this one lying flag skipped the same
+        # trainer block in all six audited runs, five trainers each). The game's
+        # own truth is a step: if any direction lands, the overworld is live.
+        from collection import navigator as _nav
+        back = None
+        for d, b in (("left", "right"), ("right", "left"), ("up", "down"), ("down", "up")):
+            if _nav._step(runner, d):
+                back = b
+                break
+        if back is None:
+            return dict(block=block.name, ran=False, reason="precondition_not_overworld",
+                        frames=runner.frame_idx - start_frame, actions=0)
+        _nav._step(runner, back)              # restore the anchor tile
+        st0 = runner.state()
     anchor = (st0.map, st0.x, st0.y)
     entry_snap = runner.save_state_bytes()
     ctx: dict[str, Any] = {"anchor": anchor}
