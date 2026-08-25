@@ -435,6 +435,21 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                         finally:
                             print(f"PARTY-EXIT frame={f} count={pc}", flush=True)
                             _os2._exit(87)
+                    # No-progress tripwire: no milestone or block has COMPLETED for
+                    # 300k frames. Catches loop classes the position check cannot —
+                    # the acceptance run oscillated Oldale<->Center for 150k frames
+                    # with the map key changing every cycle, feeding the position
+                    # check fresh keys forever. Milestone/block completion is the
+                    # one signal every healthy run emits continuously.
+                    prog = getattr(r, "_progress_frame", 0)
+                    if f - prog > 300_000:
+                        try:
+                            Path(outdir, "STALL.json").write_text(_json.dumps(
+                                {"frame_idx": f, "kind": "no_progress",
+                                 "last_progress_frame": prog, "at": _t.time()}))
+                        finally:
+                            print(f"NO-PROGRESS-EXIT frame={f} last={prog}", flush=True)
+                            _os2._exit(86)
                     if key[0] and key == sem_key:
                         sem_frames += f - last
                         if sem_frames >= 60_000:
@@ -509,6 +524,7 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                 r.update(event_id=event_id, wall_s=round(time.time() - t0, 1),
                          frames=runner.frame_idx - f0)
                 results.append(r)
+                runner._progress_frame = runner.frame_idx     # watchdog: real progress
                 st = runner.state()
                 print(json.dumps({**r, "map": st.map, "gs": st.game_state}), flush=True)
                 if r["validation"] not in ("passed", "skipped"):
@@ -533,6 +549,7 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                         outcome = run_block(runner, blk)
                     outcome["after"] = event_id
                     block_log.append(outcome)
+                    runner._progress_frame = runner.frame_idx  # watchdog: real progress
                     print(json.dumps({"BLOCK": outcome}), flush=True)
                 if stop_after and event_id == stop_after:
                     break

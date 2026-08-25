@@ -620,27 +620,31 @@ def find_path_action(state: dict[str, Any], goal_x: int, goal_y: int, use_vlm_fa
 
     _map = (state.get("map") or {}).get("id") or state.get("map_id")
     _memo_key = (_map, goal_x, goal_y, x, y)
-    if _NOPATH_MEMO.get(_memo_key, 0) >= 3:
-        return "no_op"                    # convicted from this tile; let the caller's
-                                          # own iteration caps end the attempt cheaply
-    try:
-        from utils.mapping.pathfinding import Pathfinder
+    # A convicted (map, goal, tile) skips the EXPENSIVE A* re-run — never the greedy
+    # fallback below. The first cut of this memo returned no_op outright, and the
+    # acceptance run promptly wedged on Oldale's south exit: an NPC parked on the
+    # goal tile, A* said no-path, the memo froze the player mid-map, and standing
+    # still kept the memo key identical forever. The greedy step IS the escape —
+    # it sidesteps, the position changes, the memo naturally resets.
+    if _NOPATH_MEMO.get(_memo_key, 0) < 3:
+        try:
+            from utils.mapping.pathfinding import Pathfinder
 
-        path = Pathfinder().find_path(
-            (x, y),
-            (goal_x, goal_y),
-            state,
-            max_distance=max_distance,
-            allow_partial=True,
-            blocked_coords=blocked or None,
-        )
-        if path:
-            _NOPATH_MEMO.pop(_memo_key, None)
-            return str(path[0]).lower()
-        _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
-    except Exception as exc:
-        logger.debug("Pathfinding failed: %s", exc)
-        _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
+            path = Pathfinder().find_path(
+                (x, y),
+                (goal_x, goal_y),
+                state,
+                max_distance=max_distance,
+                allow_partial=True,
+                blocked_coords=blocked or None,
+            )
+            if path:
+                _NOPATH_MEMO.pop(_memo_key, None)
+                return str(path[0]).lower()
+            _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
+        except Exception as exc:
+            logger.debug("Pathfinding failed: %s", exc)
+            _NOPATH_MEMO[_memo_key] = _NOPATH_MEMO.get(_memo_key, 0) + 1
 
     # Greedy fallback toward the goal, then any escape, skipping NPC tiles.
     prefs: list[str] = []
