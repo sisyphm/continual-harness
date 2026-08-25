@@ -310,7 +310,14 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
             # W33 §14.4 persona plumbing: the persona is a first-class manifest field
             recorder.manifest["persona"] = persona_cfg
             recorder._write_manifest()
-        sink = WorldModelSink(str(out)) if record else None
+        # W33 regen FAST-RECORD: the live sink costs 3.78 ms/frame (86% of recording
+        # overhead; raw 1,943 fps vs 141 live). The ledger is a pure function of the
+        # recorded ppu blob stream, so labels are extracted OFFLINE after the gate
+        # instead (collection/extract_ledger.py -- validated field-for-field on
+        # exp_052, all 28 fields, 6.7k frames/sec). W33_FAST_RECORD=1 detaches it.
+        import os as _os
+        _fast = _os.environ.get("W33_FAST_RECORD") == "1"
+        sink = WorldModelSink(str(out)) if (record and not _fast) else None
         if sink is not None:
             runner.frame_hook = sink.capture
         # Boot past the title screen: mash A/START until GAME_RUNNING (new game begins).

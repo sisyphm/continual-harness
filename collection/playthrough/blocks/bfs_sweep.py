@@ -38,8 +38,15 @@ class BfsSweep:
 
     def __init__(self, maps: list[str], legs: list | tuple = (),
                  per_map_frames: int = 45000, leg_frames: int = 15000,
-                 frames: int | None = None):
+                 frames: int | None = None, tiles: dict | None = None):
         self.maps = list(dict.fromkeys(maps))        # map keys "group,num", deduped in order
+        # W33 regen: optional per-map ASSIGNED TILE SETS from the reachability matrix.
+        # {map_key: [[x,y], ...]}. When present for a map, the tour's goal mask is
+        # restricted to assigned ∧ unvisited -- the rotation slices a stage-world
+        # across the fleet instead of every run re-walking whole maps. Cone-avoidance
+        # is upstream: the planner simply does not assign tiles inside trainer sight
+        # cones to pure-coverage slices.
+        self.tiles = {k: {tuple(t) for t in v} for k, v in (tiles or {}).items()}
         self.legs = [tuple(l) for l in legs]         # (mapA, mapB) connection pairs
         self.per_map_frames = per_map_frames
         self.leg_frames = leg_frames
@@ -107,10 +114,18 @@ class BfsSweep:
             denied[(x, y)] = denied.get((x, y), 0) + 1
             deny_until[(x, y)] = runner.frame_idx + _DENY_FRAMES
 
+        assigned = self.tiles.get(key)
+
         def goal(t, beh):
             nonlocal walkable_total
             g = (((t.grid >> 10) & 3) == 0) & ~avoid(t, beh)
             walkable_total = max(walkable_total, int(g.sum()))
+            if assigned:                             # regen: tour only the assigned slice
+                m = np.zeros_like(g)
+                for ax, ay in assigned:
+                    if 0 <= ay + 7 < m.shape[0] and 0 <= ax + 7 < m.shape[1]:
+                        m[ay + 7, ax + 7] = True
+                g &= m
             for vx, vy in visited:
                 g[vy + 7, vx + 7] = False
             live = int(g.sum())                      # unvisited before denials = real deficit
@@ -153,8 +168,11 @@ class BfsSweep:
                           self.phase)
             else:                                    # 'budget' ('arrived' can't happen: the
                 break                                #  goal mask never contains our own tile)
-        summary["tiles_visited_per_map"][key] = len(visited)
+        summary["tiles_visited_per_map"][key] = (
+            len(visited & assigned) if assigned else len(visited))
         summary["walkable_tiles_per_map"][key] = walkable_total
+        if assigned:
+            summary.setdefault("tiles_assigned_per_map", {})[key] = len(assigned)
         unreached = sorted({(x, y) for x, y in denied if denied[(x, y)] >= _DENY_ROUNDS}
                            - visited)
         if unreached:

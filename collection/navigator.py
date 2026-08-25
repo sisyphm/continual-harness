@@ -110,10 +110,15 @@ def _step(runner, d: str, max_frames: int = 48) -> bool:
     the first nav test failed exactly this way)."""
     _, x0, y0 = _state(runner)
     for _ in range(max_frames // 4):
-        _hold(runner, [d], 4)
+        # HOLD B: with Running Shoes (post-Pokedex) this is a 2x-speed dash -- the
+        # single largest density lever in the corpus (overworld tiles at 8 frames
+        # instead of 16). Before the shoes, holding B while walking is a no-op, so the
+        # same input is correct for the whole run. The poll-until-tile-change loop
+        # already absorbs the speed difference; gated by the 51-transition sweep.
+        _hold(runner, [d, "B"], 4)
         _, x1, y1 = _state(runner)
         if (x1, y1) != (x0, y0):
-            _hold(runner, [d], 8)                    # let the tile-walk animation commit
+            _hold(runner, [d, "B"], 6)               # let the tile-walk animation commit
             return True
     return False
 
