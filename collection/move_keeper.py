@@ -49,11 +49,15 @@ from __future__ import annotations
 KEEP_MOVE = 24
 
 _PROMPT = "delete a move to make"
+_KEEP_NAME = "double kick"
 # Callbacks the forget-prompt can be up under, sampled live on the L17 fixture: the
 # prompt is NOT raised under battle-main. Gating on 0x08038421 alone looked right and
 # silently disabled the whole guard -- the fixture lost Double Kick again with the
 # keeper "installed". 0x081BFAB5 is the summary screen the learn flow opens.
-_PROMPT_CB2 = frozenset((0x08038421, 0x081BFAB5, 0x081BFAE5))
+# 0x0813E3A5 is the EVOLUTION scene (measured live, W34): Combusken's on-evolution
+# Double Kick learn prompt runs under it, and the keeper never looked there — an
+# L16 Combusken walked out of its own evolution still holding Scratch.
+_PROMPT_CB2 = frozenset((0x08038421, 0x081BFAB5, 0x081BFAE5, 0x0813E3A5))
 
 
 def _mon(runner):
@@ -85,12 +89,18 @@ def swap_prompt_open(runner) -> bool:
     try:
         from collection.extractors.ledger_panel import CB2_ADDR
         from collection.extractors.ram import GBAState
-        if KEEP_MOVE not in set((_mon(runner) or {}).get("moves") or ()):
-            return False                 # nothing left to protect
         if GBAState(env=runner.env).u32(CB2_ADDR) not in _PROMPT_CB2:
             return False
+        held = KEEP_MOVE in set((_mon(runner) or {}).get("moves") or ())
         from collection.heatz_adapter import _read_dialog_text
-        return _PROMPT in (_read_dialog_text(runner.env) or "").lower()
+        t = (_read_dialog_text(runner.env) or "").lower()
+        if _PROMPT not in t:
+            return False
+        # PROTECT: the keeper is held and something wants its slot. ACQUIRE (W34):
+        # the keeper is the INCOMING move — Combusken's on-evolution Double Kick
+        # with four junk moves held. The old held-only gate stood down exactly
+        # then, and blind A's declined the learn.
+        return held or _KEEP_NAME in t
     except Exception:
         return False
 
@@ -117,6 +127,20 @@ def resolve(runner) -> bool:
     def press(key):
         runner.perform_action(key, metadata={"src": "move_keeper"})
         _nav._hold(runner, [], 40, "move_keeper")
+
+    held = KEEP_MOVE in set((_mon(runner) or {}).get("moves") or ())
+    if not held:
+        # ACQUIRE (W34): the prompt offers Double Kick and every held move is junk.
+        # Accept, walk the forget-cursor off slot 0 onto slot 1, confirm — the same
+        # redirect _battle_protected proved for the L17 Peck case, inverted.
+        for _ in range(4):
+            if KEEP_MOVE in set((_mon(runner) or {}).get("moves") or ()):
+                break
+            for k in ("A", "DOWN", "A", "A"):
+                press(k)
+            if not _pending(runner):
+                break
+        return KEEP_MOVE in set((_mon(runner) or {}).get("moves") or ())
 
     press("B")                            # "Delete a move to make room for X?" -> No
     for _ in range(12):                   # "Stop learning X?" -> Yes, then let it read out

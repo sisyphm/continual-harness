@@ -48,6 +48,9 @@ G_MOVE_CURSOR = 0x020244B0          # gMoveSelectionCursor[4] (u8)
 G_CTRL_FUNCS = 0x03005D60           # gBattlerControllerFuncs[4] (fn ptr)
 CTRL_ACTION_READY = 0x08057589      # HandleInputChooseAction (thumb)
 CTRL_MOVE_READY = 0x08057BFD        # HandleInputChooseMove (thumb)
+CB2_EVOLUTION = 0x0813E3A5          # evolution scene update (measured live, W34:
+                                    # rg_000's L16 Torchic — in_battle stays TRUE
+                                    # through the scene, and B CANCELS evolving)
 
 # The action menu is a 2x2 grid: FIGHT(0) BAG(1) / POKeMON(2) RUN(3). One corrective
 # press per iteration, toward the target; the re-read next iteration verifies it
@@ -176,7 +179,16 @@ def drive_battle(runner, *, mode: str = "fight", budget_frames: int = 120_000,
             # Flee mode is B-ONLY: nothing in a wild flee ever needs A ("Got away
             # safely!" and "Couldn't escape!" both advance on B), and the periodic
             # A exists solely for trainer-END text, which a flee never reaches.
-            key = "A" if (not fleeing and busy % 4 == 3) else "B"
+            # EXCEPT the evolution scene: it runs INSIDE the battle wrapper
+            # (in_battle stays true) and a single B cancels the evolution — which
+            # stranded an L16 Torchic without Combusken/Double Kick in a Roxanne
+            # lose-loop (measured, rg_000). Evolution gets A: it never cancels,
+            # and it confirms the congratulations text and the move-learn flow
+            # (move_keeper owns the forget prompt via perform_action as always).
+            if st.u32(CB2_ADDR) == CB2_EVOLUTION:
+                key = "A"
+            else:
+                key = "A" if (not fleeing and busy % 4 == 3) else "B"
             runner.perform_action(key, metadata={"src": src}, record_end_state=False)
             presses["A_busy" if key == "A" else "B"] += 1
             _nav._hold(runner, [], 10, src)
