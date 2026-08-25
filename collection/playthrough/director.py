@@ -277,7 +277,12 @@ def _verify_scheduled_blocks(schedule, results, block_log, executed_nav_phases, 
     scheduled after milestones the run never completed (abort / stop_after) are excused."""
     from collections import Counter
 
+    # Milestones a RESUME inherited ran their blocks in the PREFIX process — this
+    # process's block_log cannot contain them, and demanding it killed a stitched
+    # run at the finish line after completing everything (W34, caught live).
     completed = {r["event_id"] for r in results if r["validation"] in ("passed", "skipped")}
+    inherited = {r["event_id"] for r in results if r.get("failure_reason") == "resumed_past"}
+    completed -= inherited
     ran_after = Counter(b.get("after") for b in block_log)
     missing = [
         f"{mid}: scheduled={len(blks)} executed={ran_after.get(mid, 0)}"
