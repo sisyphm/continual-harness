@@ -448,7 +448,13 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
                     # with the map key changing every cycle, feeding the position
                     # check fresh keys forever. Milestone/block completion is the
                     # one signal every healthy run emits continuously.
-                    prog = getattr(r, "_progress_frame", 0)
+                    prog = getattr(r, "_progress_frame", None)
+                    if prog is None:
+                        # Baseline at first sight of a live frame counter — NOT 0: a
+                        # STITCH-RESUMED run starts at its cut frame, and `f - 0`
+                        # instantly exceeded the threshold, false-killing both
+                        # resumed tails ~3k frames in (caught by the monitor).
+                        r._progress_frame = prog = f
                     if f - prog > 300_000:
                         try:
                             Path(outdir, "STALL.json").write_text(_json.dumps(
