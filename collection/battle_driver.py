@@ -189,6 +189,24 @@ def drive_battle(runner, *, mode: str = "fight", budget_frames: int = 120_000,
                 key = "A"
             else:
                 key = "A" if (not fleeing and busy % 4 == 3) else "B"
+                # GENERIC move-learn flow (W34, rg_040: 60k frames wedged at
+                # "TREECKO can't learn more than four moves"): the blind cadence
+                # limit-cycles between "make room?" and "stop learning?" — B
+                # answers No to both and the flow never ends. move_keeper owns
+                # only Double Kick; every other learn is DECLINED deterministically:
+                # B on "make room?", A on "stop learning?". The 3.4ms text read is
+                # gated to long-persistent busy states, every 8th press.
+                if busy > 40 and busy % 8 == 0:
+                    try:
+                        from collection.heatz_adapter import _read_dialog_text
+                        t = (_read_dialog_text(runner.env) or "").lower()
+                        if "stop learning" in t or "give up" in t:
+                            key = "A"
+                        elif "make room" in t or "learn more than four" in t \
+                                or "can’t learn" in t or "can't learn" in t:
+                            key = "B"
+                    except Exception:
+                        pass
             runner.perform_action(key, metadata={"src": src}, record_end_state=False)
             presses["A_busy" if key == "A" else "B"] += 1
             _nav._hold(runner, [], 10, src)
