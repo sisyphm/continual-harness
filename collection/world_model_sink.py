@@ -148,9 +148,17 @@ class WorldModelSink:
         ppu = extract_full_ppu_state(env)
         blob = serialize_ppu(ppu)                # serialized ONCE, shared by both writers
         self.ppu.add(runner.frame_idx, ppu, blob=blob)
-        # ledger reads the SAME captured blob (not the live env): row == stored frame by
-        # construction, and the window-mask read gets the io/vram blocks it needs.
-        self.ledger.add(runner.frame_idx, read_ledger(GBAState.from_blob(blob)))
+        # W33 SLIM MODE (the pilot's catch): fast-record originally detached this WHOLE
+        # sink, which silently dropped ppu_state.bin -- the sufficient statistic that
+        # offline extraction and the gate's badge decode read. Six pilot runs recorded
+        # unusable-as-corpus before gate_run caught it. The expensive part was only
+        # ever the ~100-field read_ledger python extraction; the blob write + semantic
+        # line must ALWAYS be recorded. skip_ledger keeps those and drops the rest --
+        # labels come from collection/extract_ledger.py after the verify stage.
+        if not getattr(self, "skip_ledger", False):
+            # ledger reads the SAME captured blob (not the live env): row == stored
+            # frame by construction, with the io/vram blocks the window-mask needs.
+            self.ledger.add(runner.frame_idx, read_ledger(GBAState.from_blob(blob)))
         nav = runner.nav_state()
         # objects + facing via the VALIDATED extractor (extractors.entities over the live seam).
         # Runs recorded before 2026-06 carry the legacy garbage objects and input-tracker facing

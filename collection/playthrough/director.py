@@ -355,7 +355,9 @@ def run_playthrough(*, policy_dir: str, out_dir: str, rom_path: str = "Emerald-G
         # exp_052, all 28 fields, 6.7k frames/sec). W33_FAST_RECORD=1 detaches it.
         import os as _os
         _fast = _os.environ.get("W33_FAST_RECORD") == "1"
-        sink = WorldModelSink(str(out)) if (record and not _fast) else None
+        sink = WorldModelSink(str(out)) if record else None
+        if sink is not None and _fast:
+            sink.skip_ledger = True      # blobs + semantic always; labels offline
         if _os.environ.get("W33_DIRECT_RECORD") == "1":
             import threading, json as _json, os as _os2
 
