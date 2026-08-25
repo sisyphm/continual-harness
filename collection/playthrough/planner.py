@@ -30,7 +30,10 @@ STAGE_WINDOWS = {
     "S2_prepokedex": ["ROUTE_101", "OLDALE_TOWN", "ROUTE_103", "BACK_TO_OLDALE_FROM_ROUTE103"],
     "S3_postpokedex": ["OLDALE_AFTER_POKEDEX", "ROUTE101_AFTER_POKEDEX", "ROUTE_102",
                         "PETALBURG_CITY"],
-    "S4_open": ["EXIT_PETALBURG_GYM", "ROUTE_104_SOUTH"],
+    # ROUTE_104_SOUTH completes ON the seam: smoke rg_000 skipped all 5 blocks
+    # scheduled there in ~240 frames each (precondition fails in the handoff state).
+    # Use the gym exit and the woods boundary instead -- both hand off clean.
+    "S4_open": ["EXIT_PETALBURG_GYM", "PETALBURG_WOODS"],
     "S4b_postwoods": ["PETALBURG_WOODS", "ROUTE_104_NORTH"],
     "S4c_rustboro": ["RUSTBORO_CITY", "RUSTBORO_CENTER_EXITED", "HEAL_AT_RUSTBORO_CENTER"],
 }
@@ -146,6 +149,7 @@ def build_plan(seed0: int = 20260825) -> dict:
 
     # --- tile slices: every stage tile (minus cones) assigned to >=1 run, round-robin
     slices_stats = defaultdict(int)
+    folder_of = {v: k for k, v in world.key_of_folder.items()}
     ri = 0
     prev_stage = None
     for sname, wins in STAGE_WINDOWS.items():
@@ -167,10 +171,28 @@ def build_plan(seed0: int = 20260825) -> dict:
             cones = cone_tiles(world, key)
             pure = [t for t in map(tuple, tiles) if t not in cones]
             slices_stats[sname] += len(pure)
+            # GEOGRAPHY-AWARE window choice (smoke lesson: a slice scheduled at a
+            # boundary far from its map burns its budget on travel or skips):
+            # Rustboro-region maps ride the Rustboro boundaries; 104-north tiles ride
+            # ROUTE_104_NORTH; everything else uses its stage's windows.
+            folder = folder_of.get(key, "")
+            if sname.startswith("S4"):
+                if "Rustboro" in folder or folder == "Route116":
+                    use_wins = ["RUSTBORO_CITY", "RUSTBORO_CENTER_EXITED"]
+                elif folder == "Route104":
+                    ys = [t[1] for t in pure] or [50]
+                    use_wins = (["ROUTE_104_NORTH"] if sum(ys) / len(ys) < 40
+                                else ["EXIT_PETALBURG_GYM", "PETALBURG_WOODS"])
+                elif folder == "PetalburgWoods":
+                    use_wins = ["PETALBURG_WOODS"]
+                else:
+                    use_wins = wins
+            else:
+                use_wins = wins
             for i in range(0, len(pure), SLICE_TILES):
                 run = runs[ri % len(runs)]; ri += 1
                 run["block_schedule"].append([
-                    rng.choice(wins), "bfs_sweep",
+                    rng.choice(use_wins), "bfs_sweep",
                     {"maps": [gkey], "tiles": {gkey: [list(t) for t in pure[i:i + SLICE_TILES]]},
                      "per_map_frames": 9000}])
     # --- warp legs: in-scope connection pairs x LEG_QUOTA runs (block does both dirs)
@@ -184,8 +206,14 @@ def build_plan(seed0: int = 20260825) -> dict:
     for pi, pr in enumerate(sorted(pairs)):
         for q in range(LEG_QUOTA):
             run = runs[(pi * LEG_QUOTA + q) % len(runs)]
+            near = {"0,3": "RUSTBORO_CITY", "0,31": "RUSTBORO_CITY",
+                    "24,11": "PETALBURG_WOODS", "0,19": "PETALBURG_WOODS",
+                    "0,0": "PETALBURG_CITY", "0,17": "ROUTE_102",
+                    "0,10": "OLDALE_TOWN", "0,18": "ROUTE_103",
+                    "0,16": "ROUTE_101", "0,9": "ROUTE101_AFTER_POKEDEX"}
+            w = near.get(pr[0]) or near.get(pr[1]) or "RUSTBORO_CITY"
             run["block_schedule"].append([
-                "RUSTBORO_CITY", "bfs_sweep",
+                w, "bfs_sweep",
                 {"maps": [], "legs": [list(pr)], "leg_frames": 9000}])
     # --- trainers: ALL active per run, grouped per window; torchic order constraint
     for run in runs:
