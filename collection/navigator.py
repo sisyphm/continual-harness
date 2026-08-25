@@ -109,16 +109,18 @@ def _step(runner, d: str, max_frames: int = 48) -> bool:
     only turns — and a 'missed' step falsely marks a FREE cell blocked, collapsing the route;
     the first nav test failed exactly this way)."""
     _, x0, y0 = _state(runner)
-    for _ in range(max_frames // 4):
-        # HOLD B: with Running Shoes (post-Pokedex) this is a 2x-speed dash -- the
-        # single largest density lever in the corpus (overworld tiles at 8 frames
-        # instead of 16). Before the shoes, holding B while walking is a no-op, so the
-        # same input is correct for the whole run. The poll-until-tile-change loop
-        # already absorbs the speed difference; gated by the 51-transition sweep.
-        _hold(runner, [d, "B"], 4)
+    # W34 sprint item 1 (owner: many trials ahead => per-trial cost is everything).
+    # 2-frame poll granularity catches the tile commit ~2f sooner than the old 4f,
+    # and the post-commit hold drops 6 -> 2: consecutive steps chain like a held
+    # direction (Gen-3 native continuous walking) instead of resting every tile.
+    # Measured target: ~16 -> ~10 frames/tile at dash. Behavior change is deliberate;
+    # gated by the 51-transition sweep + L1 tour measurement + a fresh invariance
+    # baseline. B held throughout (dash post-shoes, no-op before).
+    for _ in range(max_frames // 2):
+        _hold(runner, [d, "B"], 2)
         _, x1, y1 = _state(runner)
         if (x1, y1) != (x0, y0):
-            _hold(runner, [d, "B"], 6)               # let the tile-walk animation commit
+            _hold(runner, [d, "B"], 2)
             return True
     return False
 
