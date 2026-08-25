@@ -57,6 +57,14 @@ def ball_throw_blocked(runner) -> bool:
         # pocket the cursor is on, this collector has no business confirming anything
         # in a battle bag -- the party must stay exactly the starter. item_use is the
         # one legitimate user and opts in explicitly for the moment it needs.
-        return not bool(getattr(runner, "allow_battle_bag", False))
+        blocked = not bool(getattr(runner, "allow_battle_bag", False))
+        if blocked:
+            # Forensic breadcrumb (W34): a catch slipped every guard twice; when the
+            # next one is dissected we need to know whether this guard even FIRED
+            # near the flip, and on what state. One line per rewrite, cheap.
+            from collection.menu_ram import bag_pocket
+            print(f"catch_guard: A->B frame={runner.frame_idx} "
+                  f"pocket={bag_pocket(st)}", flush=True)
+        return blocked
     except Exception:
         return False
