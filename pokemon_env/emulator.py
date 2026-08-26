@@ -460,6 +460,10 @@ class EmeraldEmulator:
             # Create a temporary directory and copy the gba file into it
             # this is necessary to prevent mgba from overwriting the save file (and to prevent crashes)
             tmp_dir = Path(tempfile.mkdtemp())
+            self._rom_tmp_dir = tmp_dir            # removed in stop() — 33k leaked
+            #                                        copies once filled 560G of /tmp
+            import atexit, shutil as _sh           # crash-path safety net: graceful
+            atexit.register(_sh.rmtree, str(tmp_dir), ignore_errors=True)
             tmp_gba = tmp_dir / "rom.gba"
             tmp_gba.write_bytes(Path(self.rom_path).read_bytes())
             
@@ -955,6 +959,11 @@ class EmeraldEmulator:
             self.frame_thread.join(timeout=1)
         if self.core:
             self.core = None
+        tmp = getattr(self, "_rom_tmp_dir", None)
+        if tmp is not None:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+            self._rom_tmp_dir = None
         logger.info("Emulator stopped.")
 
     def get_info(self) -> Dict[str, Any]:
