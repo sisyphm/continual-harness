@@ -955,6 +955,17 @@ def run_milestone(
                                 m[yy, xx] = True
                         return m & (((t.grid >> 10) & 3) == 0)
 
+                    # ROUTE 104 SEAM (W34, the rg_037/rg_060 loop): a goal on the
+                    # NORTH half while standing on the SOUTH half is unreachable
+                    # without the woods, and this adjacent-walk retried it forever
+                    # (rg_037 burned 4.3h; rg_060 reproduced it). Cross the seam
+                    # FIRST — the same helper _reanchor_to_expected already uses.
+                    _tt, _px, _py = _nav._state(runner)
+                    if (_tt is not None and f"{_tt.map_group},{_tt.map_num}" == _R104
+                            and _py >= _R104_SOUTH_MIN_Y and _gy < 40):
+                        print(f"spine: stuck-goal ({_gx},{_gy}) is across the 104 seam "
+                              f"from ({_px},{_py}) — crossing via the woods", flush=True)
+                        _cross_route104_seam(runner)
                     _r = _nav.goto(runner, _nav.MapKnowledge(), _goal, budget=12_000,
                                    phase="spine")
                     print(f"spine: stuck, goal ({_gx},{_gy}) is an occupied tile on "
