@@ -232,6 +232,7 @@ class TrainerEngagement:
         from collection.playthrough.blocks.interaction import (
             _close_dialog, _dialog_open_live)
         blocked: dict[tuple[int, int], int] = {}
+        dropped: dict[tuple[int, int], int] = {}     # refused GOAL cells (NPC parked on)
         misses = 0
         resets = 0
         it = 0
@@ -253,6 +254,18 @@ class TrainerEngagement:
                 if 0 <= cy + 7 < goals.shape[0] and 0 <= cx + 7 < goals.shape[1]:
                     goals[cy + 7, cx + 7] = True
             goals &= walk
+            # GOAL-DROP on refusal (W34, forensically proven on trainer 1911): the
+            # BFS enters GOAL cells regardless of the walk mask, so an NPC parked ON
+            # a goal cell (Clark and Johnson stand on each other's sight cells at
+            # Route 116; Darian's only adjacent cell hosts a bug catcher) refused the
+            # same step forever — 21/21 runs of one plan variant lost Clark to
+            # "no battle after 4 goto/talk rounds". A refused goal cell is dropped
+            # with the same 600-frame expiry the blocked dict uses; nav.goto's
+            # miss_fn contract, implemented locally.
+            dropped = {c: f for c, f in dropped.items() if runner.frame_idx - f < 600}
+            for cx, cy in dropped:
+                if 0 <= cy < goals.shape[0] and 0 <= cx < goals.shape[1]:
+                    goals[cy, cx] = False
             bx, by = x + 7, y + 7
             if not (0 <= by < goals.shape[0] and 0 <= bx < goals.shape[1]):
                 nav._hold(runner, [], 30, self.phase)
@@ -267,8 +280,9 @@ class TrainerEngagement:
                                  elev=((t.grid >> 12) & 0xF).astype(np.uint8),
                                  beh=mk.behaviors(t))
             if step is None:
-                if blocked and resets < 4:               # dead-ended by our own blocks
+                if (blocked or dropped) and resets < 4:  # dead-ended by our own blocks
                     blocked.clear()
+                    dropped.clear()
                     resets += 1
                     nav._hold(runner, [], 60, self.phase)
                     continue
@@ -277,7 +291,10 @@ class TrainerEngagement:
                 misses = 0
             else:
                 misses += 1
-                blocked[(bx + step[0], by + step[1])] = runner.frame_idx
+                tgt = (bx + step[0], by + step[1])
+                blocked[tgt] = runner.frame_idx
+                if goals[tgt[1], tgt[0]]:
+                    dropped[tgt] = runner.frame_idx      # refused GOAL: stop wanting it
                 if misses >= 8:
                     return "stuck"
                 nav._hold(runner, [], 10, self.phase)
