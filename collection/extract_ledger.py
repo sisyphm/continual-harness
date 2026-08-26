@@ -171,7 +171,8 @@ class BatchLedgerWriter(LedgerWriter):
 # ---------------------------------------------------------------------------
 
 
-def extract(run: Path, start: int | None, end: int | None, workers: int) -> tuple[int, float]:
+def extract(run: Path, start: int | None, end: int | None, workers: int,
+            out_base: Path | None = None) -> tuple[int, float]:
     """Rebuild [start, end) into <run>/ledger_offline. Returns (n_frames, seconds)."""
     global _BIN_PATH, _OFFS, _FRAMES
     frames, offs, is_key = parse_index(run)
@@ -186,7 +187,8 @@ def extract(run: Path, start: int | None, end: int | None, workers: int) -> tupl
     print(f"[extract] records [{r0}, {r1}) = frames [{frames[r0]}, {frames[r1 - 1]}] "
           f"({r1 - r0} frames), {len(tasks)} spans, {workers} workers")
 
-    out = BatchLedgerWriter(run / OUT_DIRNAME)
+    out_root = (out_base / run.name) if out_base is not None else run
+    out = BatchLedgerWriter(out_root / OUT_DIRNAME)
     t0 = time.time()
     if workers == 1 or len(tasks) == 1:
         for t in tasks:
@@ -208,7 +210,7 @@ def extract(run: Path, start: int | None, end: int | None, workers: int) -> tupl
     out.close()
     dt = time.time() - t0
     n = r1 - r0
-    print(f"[extract] {n} frames -> {run / OUT_DIRNAME} ({len(out.chunks)} chunks) "
+    print(f"[extract] {n} frames -> {out.dir} ({len(out.chunks)} chunks) "
           f"in {dt:.1f}s = {n / dt:,.0f} frames/sec")
     return n, dt
 
@@ -292,12 +294,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run", required=True, type=Path)
     ap.add_argument("--start", type=int, default=None, help="first emulator frame index (inclusive)")
     ap.add_argument("--end", type=int, default=None, help="last emulator frame index (exclusive)")
+    ap.add_argument("--out", default=None, help="write <out>/<run_name>/ledger_offline instead of into the run dir (frozen corpora)")
     ap.add_argument("--workers", type=int, default=1, help="processes; split at keyframe boundaries")
     ap.add_argument("--validate", action="store_true", help="diff ledger_offline/ vs live ledger/")
     a = ap.parse_args(argv)
     if not (a.run / "ppu_state.bin.idx.json").exists():
         raise SystemExit(f"not a recording: {a.run}")
-    extract(a.run, a.start, a.end, a.workers)
+    extract(a.run, a.start, a.end, a.workers,
+            out_base=Path(a.out) if a.out else None)
     return 0 if (not a.validate or validate(a.run)) else 1
 
 
