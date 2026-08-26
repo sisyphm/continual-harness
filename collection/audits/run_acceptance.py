@@ -199,7 +199,7 @@ def audit(run_dir: Path, plan_path: str, log_path: Path | None) -> dict:
     for r_ in receipts:
         if r_.get("block") == "mart_buy" and r_.get("ran"):
             want = dict(next((kw.get("want") or [] for _, b, kw in planned if b == "mart_buy"), []))
-            bought = {p.get("item"): p.get("qty") for p in r_.get("purchases", [])
+            bought = {p.get("item_id", p.get("item")): p.get("qty") for p in r_.get("purchases", [])
                       if p.get("verified")}
             report["mart"] = {"want": want, "bought": bought}
             for item, qty in want.items():
