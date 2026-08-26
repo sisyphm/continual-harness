@@ -27,7 +27,13 @@ OUT = WM / "data/processed/w33_regen_plan.json"
 # stage -> milestone boundaries (block runs AFTER the milestone) inside that window.
 STAGE_WINDOWS = {
     "S1_prestarter": ["LEAVE_HOUSE", "RIVAL_HOUSE"],
-    "S2_prepokedex": ["ROUTE_101", "OLDALE_TOWN", "ROUTE_103", "BACK_TO_OLDALE_FROM_ROUTE103"],
+    # ROUTE_101 window sits INSIDE the Birch rescue cutscene (measured W34: script
+    # fence exposes 24/237 tiles; sweeps scheduled there delivered 24 tiles for
+    # 712k frames fleet-wide). Entity state outside the rescue is identical to
+    # post-Pokedex, so S2 slices ride the post-lab windows; the 24-tile rescue
+    # pocket is the only distinct content and gets its own dedicated slice.
+    "S2_prepokedex": ["LITTLEROOT_TO_ROUTE101_AFTER_LAB", "EXIT_BIRCH_LAB",
+                      "OLDALE_TOWN", "ROUTE_103", "BACK_TO_OLDALE_FROM_ROUTE103"],
     "S3_postpokedex": ["OLDALE_AFTER_POKEDEX", "ROUTE101_AFTER_POKEDEX", "ROUTE_102",
                         "PETALBURG_CITY"],
     # ROUTE_104_SOUTH completes ON the seam: smoke rg_000 skipped all 5 blocks
@@ -46,6 +52,7 @@ SLICE_TILES = 45            # target tiles per sweep entry (tour ~35 f/tile with
 WINDOW_MAP = {
     "LEAVE_HOUSE": "0,9", "RIVAL_HOUSE": "0,9",
     "ROUTE_101": "0,16", "OLDALE_TOWN": "0,10", "ROUTE_103": "0,18",
+    "LITTLEROOT_TO_ROUTE101_AFTER_LAB": "0,16", "EXIT_BIRCH_LAB": "0,9",
     "BACK_TO_OLDALE_FROM_ROUTE103": "0,10", "OLDALE_AFTER_POKEDEX": "0,10",
     "ROUTE101_AFTER_POKEDEX": "0,16", "ROUTE_102": "0,17", "PETALBURG_CITY": "0,0",
     "EXIT_PETALBURG_GYM": "0,0", "PETALBURG_WOODS": "24,11",
