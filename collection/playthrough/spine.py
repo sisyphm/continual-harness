@@ -918,6 +918,22 @@ def run_milestone(
                         # wedges. Walk back out to the rival's tile ourselves; the wild
                         # draws on the way are fled now that _rival_ready has latched.
                         _reanchor_to_expected(runner, expected_state)
+                    elif _prep == "grind":
+                        # W34 fleet: 'grind' had NO action under the no-grind plan —
+                        # a seed arriving at May underleveled cycled fight-lose-heal
+                        # for 300k frames until the tripwire killed it (rg_035/rg_051,
+                        # identical signature both attempts; leveling is trainer-routed
+                        # but every scheduled trainer is AFTER this fight). Bounded
+                        # wild-XP grind to the rival bar, the one lever that resolves
+                        # it; GrindEvolve is the battle-tested machinery.
+                        from collection.playthrough.blocks.grind_evolve import GrindEvolve
+                        from collection.playthrough.blocks.base import run_nav_block
+                        blk = GrindEvolve(target_level=_RIVAL_MIN_LEVEL, frames=90_000,
+                                          heal_center=_OLDALE_CENTER, max_heals=3)
+                        out = run_nav_block(runner, blk)
+                        print(f"spine: rival grind -> {str(out.get('ended') or out.get('ran'))[:40]}",
+                              flush=True)
+                        _reanchor_to_expected(runner, expected_state)
                     continue
                 if _t is not None and 0 <= _gx < _t.map_width and 0 <= _gy < _t.map_height:
                     _adjacent_fired += 1
