@@ -919,7 +919,10 @@ def job_enumerate(runner, rng: random.Random, budget: int, target_map: str = "")
                 break                                             # warped: re-target on the new map
             if (x2, y2) != (tx, ty):                              # stepped: come back for the remaining facings
                 def back(t_, beh, tx=tx, ty=ty):
-                    m = np.zeros(t_.grid.shape, bool); m[ty + 7, tx + 7] = True; return m
+                    m = np.zeros(t_.grid.shape, bool)
+                    if 0 <= ty + 7 < m.shape[0] and 0 <= tx + 7 < m.shape[1]:   # the map may have changed under us
+                        m[ty + 7, tx + 7] = True
+                    return m
                 if goto(runner, mk, back, budget=400, phase="enum_back") != "arrived":
                     break
 
