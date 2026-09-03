@@ -854,16 +854,17 @@ import functools
 
 
 def job_enumerate(runner, rng: random.Random, budget: int, target_map: str = ""):
-    """DECISION-POINT ENUMERATION (world-model correctness data, 2026-09-03): sweep every reachable tile of the
-    current map; at each tile and each of the 4 facings do a TALK probe (one fresh A press, 32 frames) and a STEP
-    probe (hold the direction 10 frames) so the recording contains the exact row (map, x, y, facing, front object /
-    BG event, lock) -> (script start | nothing) and (step | blocked | warp | trigger). Scripts that start are
-    advanced HUMAN-style (wait for the A-wait, then press), so page/close timing is what the renderer must reproduce.
-    Rows are labelled afterwards by the v2 labeler like any recording. With target_map, goto_map there first."""
+    """DECISION-POINT ENUMERATION (world-model correctness data, 2026-09-03): sweep every REACHABLE tile of the
+    current map (the navigator's BFS picks the nearest unprobed passable tile; unreachable ones are never chosen);
+    at each tile and each of the 4 facings do a TALK probe (one fresh A press, 32 frames) and a STEP probe (hold the
+    direction 10 frames) so the recording contains the exact row (map, x, y, facing, front object / BG event, lock)
+    -> (script start | nothing) and (step | blocked | warp | trigger). Scripts that start are advanced HUMAN-style
+    (wait for the A-wait, then press). Rows are labelled afterwards by the v2 labeler like any recording."""
     from collection.navigator import MapKnowledge, _clear_dialog, _dialog_open, _state, goto, goto_map
     import numpy as np
     mk = MapKnowledge()
     done: set = set()
+    stuck_maps: set = set()
     while runner.frame_idx < budget:
         if _in_battle(runner):
             _battle_one(runner, rng, "run")
@@ -875,22 +876,31 @@ def job_enumerate(runner, rng: random.Random, budget: int, target_map: str = "")
             if goto_map(runner, mk, target_map) not in ("arrived", "battle"):
                 _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "enum")
             continue
-        # candidate tiles: passable (collision bits == 0) inside the map, nearest-first, not yet probed
-        coll = (t.grid >> 10) & 3
-        cands = [(abs(tx - x) + abs(ty - y), tx, ty) for ty in range(t.map_height) for tx in range(t.map_width)
-                 if coll[ty + 7, tx + 7] == 0 and (key, tx, ty) not in done]
-        if not cands:
+        if key in stuck_maps:
             if target_map:
                 return
             _hold(runner, [rng.choice(DIRS)], rng.randint(16, 48), "enum_roam"); continue
-        _, tx, ty = min(cands)
+        if (key, x, y) not in done:
+            tx, ty = x, y                                         # probe where we stand first
+        else:
+            def goal(t_, beh, key=key):
+                coll = (t_.grid >> 10) & 3
+                m = np.zeros(t_.grid.shape, bool)
+                for gy in range(t_.map_height):
+                    for gx in range(t_.map_width):
+                        if coll[gy + 7, gx + 7] == 0 and (key, gx, gy) not in done:
+                            m[gy + 7, gx + 7] = True
+                return m
+            r = goto(runner, mk, goal, budget=600, phase="enum_nav")
+            if r == "stuck":
+                stuck_maps.add(key); continue                    # nothing unprobed is reachable: map done
+            if r != "arrived":
+                continue
+            t, tx, ty = _state(runner)
+            if t is None:
+                continue
         done.add((key, tx, ty))
-        if (tx, ty) != (x, y):
-            def goal(t_, beh, tx=tx, ty=ty):
-                m = np.zeros(t_.grid.shape, bool); m[ty + 7, tx + 7] = True; return m
-            if goto(runner, mk, goal, budget=3000, phase="enum_nav") != "arrived":
-                continue                                          # unreachable from here: skip the tile
-        for d in DIRS:                                            # 4 facings
+        for d in DIRS:                                            # 4 facings at this tile
             if runner.frame_idx >= budget:
                 return
             _tap_turn(runner, d)
@@ -900,17 +910,17 @@ def job_enumerate(runner, rng: random.Random, budget: int, target_map: str = "")
             if _dialog_open(runner):
                 _advance_dialog(runner, rng, "slow_a")            # human-style: wait for the A-wait, then press
                 _clear_dialog(runner, "enum_talk")
-            _hold(runner, [d], 10, "enum_step")                   # STEP probe: hold the direction (step / blocked / warp / trigger)
+            _hold(runner, [d], 10, "enum_step")                   # STEP probe: step / blocked / warp / trigger
             _hold(runner, [], 8, "enum_settle")
-            if _dialog_open(runner):                              # a trigger tile fired a script
+            if _dialog_open(runner):
                 _advance_dialog(runner, rng, "slow_a"); _clear_dialog(runner, "enum_step")
             t2, x2, y2 = _state(runner)
             if t2 is None or f"{t2.map_group},{t2.map_num}" != key:
-                break                                             # warped: the outer loop re-targets on the new map
-            if (x2, y2) != (tx, ty):                              # stepped: walk back so the other facings probe the same tile
+                break                                             # warped: re-target on the new map
+            if (x2, y2) != (tx, ty):                              # stepped: come back for the remaining facings
                 def back(t_, beh, tx=tx, ty=ty):
                     m = np.zeros(t_.grid.shape, bool); m[ty + 7, tx + 7] = True; return m
-                if goto(runner, mk, back, budget=1500, phase="enum_back") != "arrived":
+                if goto(runner, mk, back, budget=400, phase="enum_back") != "arrived":
                     break
 
 JOBS = {"enumerate": job_enumerate, "idle": job_idle, "fidget": job_fidget, "battle": job_battle,
